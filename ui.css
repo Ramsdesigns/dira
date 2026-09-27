@@ -1,0 +1,104 @@
+/* =====================================================================
+   צייד הדירות — מערכת עיצוב
+   בסיס דיו קר + מבטא ענבר יחיד (כמו האייקון). ירוק/אדום רק למשמעות: עומד / נכשל.
+   ===================================================================== */
+
+:root{
+  --bg:          oklch(0.170 0.012 265);
+  --surface:     oklch(0.205 0.012 265);
+  --raised:      oklch(0.240 0.013 265);
+  --raised-hi:   oklch(0.280 0.014 265);
+  --line:        oklch(0.310 0.014 265);
+  --line-hi:     oklch(0.400 0.016 265);
+
+  --text:        oklch(0.955 0.006 265);
+  --text-2:      oklch(0.760 0.012 265);
+  --text-3:      oklch(0.640 0.014 265);
+
+  --accent:      oklch(0.800 0.140 72);
+  --accent-hi:   oklch(0.855 0.135 72);
+  --accent-ink:  oklch(0.220 0.045 72);
+  --accent-soft: oklch(0.800 0.140 72 / 0.13);
+  --accent-line: oklch(0.800 0.140 72 / 0.40);
+
+  --good:        oklch(0.765 0.140 158);
+  --good-soft:   oklch(0.765 0.140 158 / 0.14);
+  --warn:        oklch(0.820 0.130 95);
+  --warn-soft:   oklch(0.820 0.130 95 / 0.14);
+  --bad:         oklch(0.690 0.180 22);
+  --bad-soft:    oklch(0.690 0.180 22 / 0.14);
+  --bad-line:    oklch(0.690 0.180 22 / 0.40);
+
+  --font: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --fs-xs: 0.6875rem; --fs-sm: 0.78125rem; --fs-md: 0.875rem; --fs-base: 0.9375rem;
+  --fs-lg: 1.0625rem; --fs-xl: 1.3125rem; --fs-2xl: 1.625rem;
+
+  --r-sm: 6px; --r-md: 9px; --r-lg: 13px;
+  --rail-w: 232px; --top-h: 58px;
+  --ease: cubic-bezier(.22,1,.36,1);
+  --t: 160ms var(--ease);
+  color-scheme: dark;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:var(--fs-md);line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-hi)}
+.sprite{display:none}
+.ico{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ico.sm{width:15px;height:15px}
+.grow{flex:1}
+.muted{color:var(--text-2)}
+.dim{color:var(--text-3)}
+.num{font-variant-numeric:tabular-nums;direction:ltr;unicode-bidi:isolate}
+[hidden]{display:none!important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm)}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--line-hi);background-clip:content-box}
+
+/* ---------- כפתורים ---------- */
+.btn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 13px;border-radius:var(--r-md);
+  border:1px solid var(--line);background:var(--raised);color:var(--text);font:inherit;font-weight:560;cursor:pointer;
+  transition:background var(--t),border-color var(--t),color var(--t);white-space:nowrap}
+.btn:hover{background:var(--raised-hi);border-color:var(--line-hi)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent-hi);border-color:var(--accent-hi)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--text-2)}
+.btn.ghost:hover{background:var(--raised);color:var(--text)}
+.btn.danger{color:var(--bad)}
+.btn.danger:hover{background:var(--bad-soft);border-color:var(--bad-line)}
+.btn.sm{height:28px;padding:0 9px;font-size:var(--fs-sm)}
+.btn.icon{width:34px;padding:0;justify-content:center}
+.btn.icon.sm{width:28px}
+
+/* ---------- שדות ---------- */
+input[type=text],input[type=number],input[type=search],input[type=password],input[type=time],input[type=url],select,textarea{
+  font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);
+  height:34px;padding:0 10px;min-width:0;transition:border-color var(--t)}
+textarea{height:auto;padding:8px 10px;resize:vertical;line-height:1.5}
+input:hover,select:hover,textarea:hover{border-color:var(--line-hi)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+input[type=number]{direction:ltr;text-align:right}
+input[type=range]{accent-color:var(--accent)}
+input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
+label.field{display:flex;flex-direction:column;gap:5px;font-size:var(--fs-sm);color:var(--text-2)}
+label.check{display:inline-flex;align-items:center;gap:8px;cursor:pointer}
+
+/* ---------- תגיות ---------- */
+.chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:99px;font-size:var(--fs-xs);
+  font-weight:600;background:var(--raised);color:var(--text-2);border:1px solid var(--line);white-space:nowrap}
+.chip.ok{background:var(--good-soft);color:var(--good);border-color:transparent}
+.chip.partial{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.chip.fail{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.chip.unknown,.chip.pending{background:transparent;color:var(--text-3);border-style:dashed}
+.chip.accent{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-line)}
+
+/* ---------- טוסט ---------- */
+.toast{position:fixed;bottom:22px;inset-inline-start:50%;transform:translateX(50%);background:var(--raised-hi);color:var(--text);
+  border:1px solid var(--line-hi);padding:10px 16px;border-radius:var(--r-md);box-shadow:0 10px 30px #0008;z-index:100;
+  font-weight:560;animation:toast .2s var(--ease)}
+.toast.err{border-color:var(--bad-line);color:var(--bad)}
+@keyframes toast{from{opacity:0;transform:translate(50%,8px)}}
