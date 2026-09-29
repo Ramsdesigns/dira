@@ -4,22 +4,18 @@
 import * as db from "./lib/store.js";
 import { scoreListing, monthlyPayment, criterionLabel } from "./lib/score.js";
 import {
-  IMPORTANCE, FEATURES, STATUSES, SOURCE_TYPES, CRITERION_KINDS, PROFILE_TEMPLATES, AI_MODELS as MODELS,
+  IMPORTANCE, FEATURES, STATUSES, REJECT_REASONS, SOURCE_TYPES, CRITERION_KINDS, PROFILE_TEMPLATES, AI_MODELS as MODELS,
   newCriterion, uid, detectSourceType, dealTypeFromUrl, DEFAULT_MESSAGE, defaultSettings, defaultSources,
 } from "./lib/model.js";
 import { waNumber, norm } from "./lib/text.js";
-
-const APPS_SCRIPT_CODE = `function doPost(e) {
-  var d = JSON.parse(e.postData.contents);
-  if (d.secret !== 'SECRET_HERE') return ContentService.createTextOutput('forbidden');
-  MailApp.sendEmail({ to: d.to, subject: d.subject, htmlBody: d.html, name: 'צייד הדירות' });
-  return ContentService.createTextOutput('ok');
-}`;
+import { clusterListings, mergeCluster } from "./lib/dedup.js";
 
 /* ======================= מצב ======================= */
 
 let S = null;            // הגדרות
-let L = [];              // מודעות
+let L = [];              // מודעות (כמו שהן בענן — רשומה לכל מקור)
+let CL = [];             // קבוצות של "אותה דירה" (מקורות שונים)
+let V = [];              // מה שמוצג: כרטיס אחד לכל דירה
 let SC = {};             // מצב הסורק במחשב (דופק, מצב מקורות, שימוש ב-AI)
 let srcState = {};
 let lastRunAt = null;
@@ -42,7 +38,14 @@ const profile = () => S.profiles.find(p => p.id === UI.profileId) ?? S.profiles[
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtPrice = p => (p ? "₪" + Math.round(p).toLocaleString("he-IL") : "מחיר לא צוין");
 const fmtK = p => (p >= 1e6 ? (p / 1e6).toFixed(p % 1e6 ? 2 : 0).replace(/\.?0+$/, "") + "M" : Math.round(p / 1000) + "K");
-const icon = (id, cls = "") => `<svg class="ico ${cls}"><use href="#i-${id}"/></svg>`;
+const icon = (id, cls = "") => `<svg class="ico ${cls}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
+// כתובות שמגיעות מהנתונים (מודעות, מקורות) נכנסות ל-href רק אם הן https — כתובת "javascript:" לא תרוץ בלחיצה
+const safeUrl = u => /^https:\/\//i.test(String(u ?? "")) ? String(u) : "#";
+const EXT = 'target="_blank" rel="noopener noreferrer"';
+// מה שהסורק במחשב דיווח: האם הסודות מוגדרים אצלו (הערכים עצמם לא מגיעים לאפליקציה)
+const secretOn = k => !!SC.secrets?.[k];
+const setChip = on => `<span class="chip ${on ? "ok" : "fail"}">${on ? "מוגדר" : "לא מוגדר"}</span>`;
+const SECRETS_HOW = "מזינים אותו בתוסף במחשב: אייקון התוסף ← \"מפתחות וסיסמאות\". הוא נשמר רק שם, ולא עולה לענן.";
 
 function ago(t) {
   if (!t) return "";
@@ -56,12 +59,21 @@ function ago(t) {
   return d === 1 ? "אתמול" : `לפני ${d} ימים`;
 }
 
-function toast(msg, err = false) {
+function toast(msg, err = false, action = null) {
+  document.querySelectorAll(".toast").forEach(x => x.remove());
   const t = document.createElement("div");
   t.className = "toast" + (err ? " err" : "");
+  t.setAttribute("role", "status");
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.className = "toast-act";
+    b.textContent = action.label;
+    b.onclick = () => { t.remove(); action.run(); };
+    t.append(b);
+  }
   document.body.append(t);
-  setTimeout(() => t.remove(), 3200);
+  setTimeout(() => t.remove(), action ? 6500 : 3200);
 }
 
 let saveTimer = null;
@@ -128,6 +140,7 @@ function ppsqmInfo(l) {
 async function loadAll() {
   S = await db.getSettings();
   L = await db.allListings({ refresh: false });
+  buildView();
   if (!S.profiles.some(p => p.id === UI.profileId)) UI.profileId = S.profiles.find(p => p.active)?.id ?? S.profiles[0]?.id;
   buildAreaStats();
   renderProfileSel();
@@ -139,9 +152,23 @@ function renderProfileSel() {
     `<option value="${p.id}" ${p.id === UI.profileId ? "selected" : ""}>${esc(p.name)}${p.active ? "" : " (כבוי)"}</option>`).join("");
 }
 
+/** מאחד עותקים של אותה דירה ממקורות שונים לכרטיס אחד. */
+function buildView() {
+  CL = clusterListings(L);
+  V = CL.map(mergeCluster);
+}
+
+/** אחרי שינוי במצב משתמש — מחשבים מחדש רק את הכרטיס של הדירה הזו. */
+function remerge(id) {
+  const i = CL.findIndex(g => g.some(l => l.id === id));
+  if (i >= 0) V[i] = mergeCluster(CL[i]);
+}
+
+const viewOf = id => V.find(x => x.id === id || x.members?.includes(id));
+
 function scored() {
   const P = profile();
-  return L.map(l => ({ l, s: P ? scoreListing(l, P) : null })).filter(x => x.s);
+  return V.map(l => ({ l, s: P ? scoreListing(l, P) : null })).filter(x => x.s);
 }
 
 function renderCounts() {
@@ -149,14 +176,16 @@ function renderCounts() {
   const sc = scored();
   const above = sc.filter(x => !x.s.mustFail && x.s.pct >= (P?.notifyThreshold ?? 70) && !x.l.user?.hidden);
   $("#cntListings").textContent = above.length || "";
-  $("#cntFav").textContent = L.filter(l => l.user?.fav).length || "";
+  $("#cntFav").textContent = V.filter(l => l.user?.fav).length || "";
+  const nRej = V.filter(l => l.user?.status === "rejected").length;
+  if ($("#cntRejected")) $("#cntRejected").textContent = nRej || "";
   $("#cntPairs").textContent = pairGroups().length || "";
   $("#cntSources").textContent = S.sources.filter(s => s.enabled).length || "";
 }
 
 /* ======================= ניתוב ======================= */
 
-const views = { more: viewMore, listings: viewListings, favorites: viewFavorites, pairs: viewPairs, profile: viewProfile, sources: viewSources, notify: viewNotify, settings: viewSettings, log: viewLog };
+const views = { rejected: viewRejected, more: viewMore, listings: viewListings, favorites: viewFavorites, pairs: viewPairs, profile: viewProfile, sources: viewSources, notify: viewNotify, settings: viewSettings, log: viewLog };
 
 function route() {
   const [view, sub] = (location.hash.slice(1) || "listings").split("/");
@@ -203,7 +232,7 @@ function onboardingHtml() {
   const hasFb = S.sources.some(s => s.type === "fb_group" || s.type === "fb_market");
   const steps = [
     [!!SC.heartbeat, "התקן את תוסף הסורק ב-Chrome במחשב והתחבר בו עם אותו משתמש", "#settings", "איך מתקינים"],
-    [S.ai.provider === "api" ? !!S.ai.apiKey : !!SC.aiHost?.ok, "חבר את Claude (דרך המנוי שלך) — כדי לקרוא פוסטים בפייסבוק ולהעריך את השאלות החופשיות", "#settings", "להגדרות AI"],
+    [S.ai.provider === "api" ? secretOn("apiKey") : !!SC.aiHost?.ok, "חבר את Claude (דרך המנוי שלך) — כדי לקרוא פוסטים בפייסבוק ולהעריך את השאלות החופשיות", "#settings", "להגדרות AI"],
     [!!S.onboard?.profileReviewed, "עבור על הפרופיל: תקציב, אזורים, וכמה חשוב כל דבר", "#profile", "לפרופיל"],
     [hasFb, "הוסף קבוצות פייסבוק של דירות באזור (נכנסים לקבוצה ← אייקון התוסף ← 'הוסף כמקור')", "#sources", "למקורות"],
     [S.notify.telegram.enabled || S.notify.email.enabled, "חבר טלגרם או מייל כדי לקבל התראות לטלפון", "#notify", "להתראות"],
@@ -257,7 +286,7 @@ function viewListings() {
 /** ערכים קיימים בנתונים (שכונות / סוגי נכס) עם כמות, לתפריטי הסינון. */
 function countBy(field) {
   const m = new Map();
-  for (const l of L) if (l[field] && !l.user?.hidden) m.set(l[field], (m.get(l[field]) ?? 0) + 1);
+  for (const l of V) if (l[field] && !l.user?.hidden) m.set(l[field], (m.get(l[field]) ?? 0) + 1);
   return [...m].sort((a, b) => b[1] - a[1]);
 }
 
@@ -267,8 +296,13 @@ function emptyHtml(total) {
 }
 
 function ring(s, big = false) {
-  return `<div class="ring ${s.pendingAi && S.ai.apiKey ? "pending" : ""}" style="--p:${s.pct};--c:${scoreColor(s.pct)}" title="${s.mustFail ? "נכשל בקריטריון חובה" : `ודאות ${s.confidence}%`}${s.pendingAi ? " · ממתין להערכת AI" : ""}">
+  return `<div class="ring ${s.pendingAi && secretOn("apiKey") ? "pending" : ""}" style="--p:${s.pct};--c:${scoreColor(s.pct)}" title="${s.mustFail ? "נכשל בקריטריון חובה" : `ודאות ${s.confidence}%`}${s.pendingAi ? " · ממתין להערכת AI" : ""}">
     <b>${s.pct}<small>%</small></b></div>`;
+}
+
+/** האם יש דרך להעריך שאלות AI: מנוי דרך הגשר, או מפתח API שמוגדר בתוסף. */
+function aiConfigured() {
+  return !!S.ai.enabled && ((S.ai.provider ?? "subscription") === "subscription" || secretOn("apiKey"));
 }
 
 function isGone(l) {
@@ -290,12 +324,13 @@ function card(l, s) {
   const status = l.user?.status ?? "new";
   return `<article class="card ${l.user?.seen ? "" : "unseen"} ${s.mustFail || status === "rejected" ? "muted-card" : ""}" data-id="${esc(l.id)}">
     <div class="pic">
-      ${img ? `<img src="${esc(img)}" loading="lazy" alt="" referrerpolicy="no-referrer">` : `<div class="noimg">${esc((l.text ?? "").slice(0, 140)) || "אין תמונה"}</div>`}
+      ${img ? `<img src="${esc(img)}" loading="lazy" alt="${esc(`תמונה של הדירה: ${facts(l) || place(l)}`)}" referrerpolicy="no-referrer">` :`<div class="noimg">${esc((l.text ?? "").slice(0, 140)) || "אין תמונה"}</div>`}
       <div class="badges">
         ${!l.user?.seen ? `<span class="badge new">חדש</span>` : ""}
         ${drop ? `<span class="badge drop">${icon("down", "sm")}ירד מחיר</span>` : ""}
         ${l.pairWith?.length ? `<span class="badge pair">עוד דירה בבניין</span>` : ""}
         ${isGone(l) ? `<span class="badge gone">ייתכן שהוסרה</span>` : ""}
+        ${(l.members?.length ?? 1) > 1 ? `<span class="badge multi" title="אותה דירה פורסמה בכמה מקומות — מוצגת פעם אחת">${l.members.length} מודעות</span>` : ""}
       </div>
       ${ring(s)}
     </div>
@@ -304,16 +339,19 @@ function card(l, s) {
         ${pp ? `<span class="ppsqm">₪${Math.round(pp.v).toLocaleString("he-IL")} למ״ר${pp.diff !== null ? ` · <span class="${pp.diff <= -5 ? "cheap" : pp.diff >= 5 ? "pricey" : ""}">${pp.diff > 0 ? "+" : ""}${pp.diff}% מהחציון ${pp.scope}</span>` : ""}</span>` : ""}</div>
       <div class="facts">${esc(facts(l)) || "<span class='dim'>פרטים חסרים</span>"}</div>
       <div class="place">${esc(place(l))}${l.address && !place(l).includes(l.address) ? " · " + esc(l.address) : ""}</div>
+      ${status === "rejected" ? `<div class="reject-line">${icon("ban", "sm")}<span>${esc(REJECT_REASONS[l.user.rejectReason] ?? "סומנה כלא רלוונטית")}${l.user.rejectNote ? ` — ${esc(l.user.rejectNote)}` : ""}</span></div>` : ""}
       ${aiLine ? `<div class="ai-line">${icon("spark", "sm")}<span><b>${esc(aiLine.label)}:</b> ${esc(aiLine.detail)}</span></div>` : ""}
       <div class="crit">${chips}</div>
     </div>
     <div class="foot">
-      <button class="btn icon sm ghost ${l.user?.fav ? "fav-on" : ""}" data-act="fav" title="מועדף">${icon("star", "sm")}</button>
-      <select data-act="status" title="סטטוס">${Object.entries(STATUSES).map(([k, v]) => `<option value="${k}" ${k === status ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <button class="btn icon sm ghost ${l.user?.fav ? "fav-on" : ""}" data-act="fav" title="מועדף" aria-label="${l.user?.fav ? "הסר ממועדפים" : "שמור במועדפים"}" aria-pressed="${!!l.user?.fav}">${icon("star", "sm")}</button>
+      <select data-act="status" title="סטטוס" aria-label="סטטוס">${Object.entries(STATUSES).map(([k, v]) => `<option value="${k}" ${k === status ? "selected" : ""}>${v}</option>`).join("")}</select>
       <span class="srcline" title="${esc(srcs)}">${esc(srcs)} · ${ago(l.firstSeen)}</span>
-      ${l.phone ? `<button class="btn icon sm ghost" data-act="wa" title="וואטסאפ">${icon("chat", "sm")}</button>` : ""}
-      <button class="btn icon sm ghost" data-act="open" title="פתח מודעה">${icon("external", "sm")}</button>
-      <button class="btn icon sm ghost" data-act="hide" title="הסתר">${icon("eye-off", "sm")}</button>
+      ${l.phone ? `<button class="btn icon sm ghost" data-act="wa" title="וואטסאפ" aria-label="שלח הודעת וואטסאפ למפרסם">${icon("chat", "sm")}</button>` : ""}
+      <button class="btn icon sm ghost" data-act="open" title="פתח מודעה" aria-label="פתח את המודעה באתר המקור">${icon("external", "sm")}</button>
+      ${status === "rejected"
+        ? `<button class="btn sm ghost" data-act="unreject" title="החזר לרשימה">${icon("undo", "sm")}החזר</button>`
+        : `<button class="btn icon sm ghost" data-act="reject" title="לא רלוונטי" aria-label="סמן כלא רלוונטית">${icon("ban", "sm")}</button>`}
     </div>
   </article>`;
 }
@@ -368,13 +406,14 @@ function waLink(l) {
     .replaceAll("{חדרים}", l.rooms ?? "")
     .replaceAll("{מחיר}", l.price ? fmtPrice(l.price) : "")
     .replaceAll("{קישור}", l.url ?? "");
-  return `https://wa.me/${waNumber(l.phone)}?text=${encodeURIComponent(msg)}`;
+  return safeUrl(`https://wa.me/${waNumber(l.phone)}?text=${encodeURIComponent(msg)}`);
 }
 
 async function openDrawer(id) {
-  const l = L.find(x => x.id === id);
+  const l = viewOf(id);
   if (!l) return;
-  if (!l.user?.seen) { l.user = { ...l.user, seen: true }; db.updateUser(id, { seen: true }); }
+  id = l.id;
+  if (!l.user?.seen) setUser(l, { seen: true });
   const P = profile();
   const s = scoreListing(l, P) ?? { pct: 0, breakdown: [], confidence: 0 };
   const pp = ppsqmInfo(l);
@@ -391,18 +430,21 @@ async function openDrawer(id) {
   ].filter(([, v]) => v !== null && v !== undefined && v !== "");
 
   $("#drawerBody").innerHTML = `
-    <div class="gallery">${l.images?.length ? l.images.map((src, i) => `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">אין תמונות</div>`}</div>
+    <div class="gallery">${l.images?.length ? l.images.map((src, i) => `<img src="${esc(src)}" alt="תמונה ${i + 1} מתוך ${l.images.length} של הדירה (לחיצה מגדילה)" tabindex="0" role="button" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">אין תמונות</div>`}</div>
     ${l.images?.length > 1 ? `<div class="gallery-count">${l.images.length} תמונות · לחץ להגדלה</div>` : ""}
     <div class="dsec">
       <div class="dhead">${ring(s, true)}<div class="grow"><h2>${esc(facts(l) || l.title || "מודעה")}</h2><p class="muted">${esc(place(l))}${l.address ? " · " + esc(l.address) : ""}</p></div></div>
       <br><div class="actions" data-id="${esc(l.id)}">
         <button class="btn ${l.user?.fav ? "fav-on" : ""}" data-act="fav">${icon("star", "sm")}${l.user?.fav ? "במועדפים" : "שמור במועדפים"}</button>
-        <select data-act="status">${Object.entries(STATUSES).map(([k, v]) => `<option value="${k}" ${k === (l.user?.status ?? "new") ? "selected" : ""}>${v}</option>`).join("")}</select>
-        ${l.phone ? `<a class="btn primary" href="${esc(waLink(l))}" target="_blank">${icon("chat", "sm")}וואטסאפ עם הודעה מוכנה</a>` : ""}
-        <a class="btn" href="${esc(l.url)}" target="_blank">${icon("external", "sm")}פתח מודעה</a>
-        <button class="btn ghost" data-act="hide">${icon("eye-off", "sm")}${l.user?.hidden ? "בטל הסתרה" : "הסתר"}</button>
+        <select data-act="status" aria-label="סטטוס">${Object.entries(STATUSES).map(([k, v]) => `<option value="${k}" ${k === (l.user?.status ?? "new") ? "selected" : ""}>${v}</option>`).join("")}</select>
+        ${l.phone ? `<a class="btn primary" href="${esc(waLink(l))}" ${EXT}>${icon("chat", "sm")}וואטסאפ עם הודעה מוכנה</a>` : ""}
+        <a class="btn" href="${esc(safeUrl(l.url))}" ${EXT}>${icon("external", "sm")}פתח מודעה</a>
+        ${l.user?.status === "rejected"
+          ? `<button class="btn ghost" data-act="unreject">${icon("undo", "sm")}החזר לרשימה</button>`
+          : `<button class="btn ghost" data-act="reject">${icon("ban", "sm")}לא רלוונטית</button>`}
       </div>
     </div>
+    ${l.user?.status === "rejected" ? `<div class="dsec reject-box">${icon("ban", "sm")}<div><b>סומנה כלא רלוונטית</b><p>${esc(REJECT_REASONS[l.user.rejectReason] ?? "בלי סיבה")}${l.user.rejectNote ? ` — ${esc(l.user.rejectNote)}` : ""}</p></div></div>` : ""}
     ${adTextHtml(l)}
     <div class="dsec"><h3>למה ${s.pct}%${s.mustFail ? " (נכשל בחובה)" : ""} · ודאות ${s.confidence}%</h3>
       <div class="breakdown">${s.breakdown.map(b => `<div class="bd ${b.state}"><span class="mark"></span>
@@ -413,17 +455,37 @@ async function openDrawer(id) {
       ${featTxt ? `<p style="margin-top:12px">${esc(featTxt)}</p>` : ""}</div>
 
     ${(l.priceHistory?.length ?? 0) > 1 ? `<div class="dsec"><h3>היסטוריית מחיר</h3><div class="hist">${l.priceHistory.map(h => `<div><span class="num">${fmtPrice(h.price)}</span> <span class="dim">· ${new Date(h.at).toLocaleDateString("he-IL")}</span></div>`).join("")}</div></div>` : ""}
-    <div class="dsec"><h3>פורסם ב-${(l.links ?? []).length || 1} מקומות</h3><div class="links">${(l.links ?? [{ source: l.source, url: l.url }]).map(k => `<a class="btn sm" href="${esc(k.url)}" target="_blank">${esc(SOURCE_TYPES[k.source]?.label ?? k.source)}${icon("external", "sm")}</a>`).join("")}</div></div>
-    <div class="dsec"><h3>הערות שלי</h3><textarea rows="4" style="width:100%" data-note="${esc(l.id)}" placeholder="מה לשאול, מה ראיתי בביקור, מספר של השכן…">${esc(l.user?.note ?? "")}</textarea></div>
+    <div class="dsec"><h3>פורסם ב-${(l.links ?? []).length || 1} מקומות</h3><div class="links">${(l.links ?? [{ source: l.source, url: l.url }]).map(k => `<a class="btn sm" href="${esc(safeUrl(k.url))}" ${EXT}>${esc(SOURCE_TYPES[k.source]?.label ?? k.source)}${icon("external", "sm")}</a>`).join("")}</div></div>
+    <div class="dsec"><h3>הערות שלי</h3><textarea rows="4" style="width:100%" aria-label="הערות שלי" data-note="${esc(l.id)}" placeholder="מה לשאול, מה ראיתי בביקור, מספר של השכן…">${esc(l.user?.note ?? "")}</textarea></div>
   `;
+  const wasHidden = $("#drawer").hidden;
   $("#drawer").hidden = false;
+  // פוקוס לחלון שנפתח, וחזרה למקום הקודם כשהוא נסגר — כדי שאפשר יהיה לעבוד במקלדת ובקורא מסך
+  if (wasHidden) { drawerReturn = document.activeElement; $("#drawer .drawer-x").focus(); }
   // "הצג את כל המודעה" רק אם הטקסט באמת נחתך
   const at = $("#adText");
   if (at && at.scrollHeight > at.clientHeight + 4) at.nextElementSibling.hidden = false;
   renderCounts();
 }
 
-function closeDrawer() { $("#drawer").hidden = true; }
+let drawerReturn = null;
+function closeDrawer() {
+  if ($("#drawer").hidden) return;
+  $("#drawer").hidden = true;
+  if (drawerReturn?.isConnected) drawerReturn.focus();
+  drawerReturn = null;
+}
+
+/** Tab בתוך חלון פתוח (מגירה / תמונות) נשאר בתוכו, ולא בורח לדף שמאחוריו. */
+function trapTab(e, box) {
+  const els = [...box.querySelectorAll('a[href],button:not([disabled]),select,textarea,input,[tabindex="0"]')]
+    .filter(el => !el.hidden && el.getClientRects().length);
+  if (!els.length) return;
+  const first = els[0], last = els.at(-1);
+  if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
 
 /** מה שהמפרסם כתב במודעה, כמו שהוא. ביד 2 ובמדלן התיאור המלא מגיע רק אחרי שהסורק נכנס לעמוד המודעה. */
 function adTextHtml(l) {
@@ -434,7 +496,7 @@ function adTextHtml(l) {
        <button class="btn sm ghost more-text" data-act="expandText" hidden>הצג את כל המודעה</button>`
     : `<p class="muted">התיאור המלא עוד לא נקרא מ${fromSite ? (l.source === "yad2" ? "יד 2" : "מדלן") : "המקור"} — הסורק יקרא אותו באחד הסבבים הקרובים.
        ${l.text ? `<br>מה שידוע כרגע: ${esc(l.text)}` : ""}</p>
-       <a class="btn sm" href="${esc(l.url)}" target="_blank">${icon("external", "sm")}לקריאה באתר</a>`;
+       <a class="btn sm" href="${esc(safeUrl(l.url))}" ${EXT}>${icon("external", "sm")}לקריאה באתר</a>`;
   return `<div class="dsec"><h3>מה כתוב במודעה</h3>${body}</div>`;
 }
 
@@ -442,17 +504,23 @@ function adTextHtml(l) {
 function openLightbox(images, start) {
   const lb = document.createElement("div");
   lb.className = "lightbox";
-  lb.innerHTML = `<div class="lb-track">${images.map(src => `<div class="lb-slide"><img src="${esc(src)}" alt="" referrerpolicy="no-referrer"></div>`).join("")}</div>
-    <button class="btn icon lb-x" aria-label="סגור">${icon("x")}</button>
-    <div class="lb-count"><span>${start + 1}</span> / ${images.length}</div>`;
+  lb.setAttribute("role", "dialog");
+  lb.setAttribute("aria-modal", "true");
+  lb.setAttribute("aria-label", "תמונות הדירה");
+  lb.innerHTML = `<div class="lb-track">${images.map((src, i) => `<div class="lb-slide"><img src="${esc(src)}" alt="תמונה ${i + 1} מתוך ${images.length}" referrerpolicy="no-referrer"></div>`).join("")}</div>
+    <button class="btn icon lb-x" aria-label="סגור את התמונות">${icon("x")}</button>
+    <div class="lb-count" aria-live="polite"><span>${start + 1}</span> / ${images.length}</div>`;
+  const back = document.activeElement;
   document.body.append(lb);
+  lb.querySelector(".lb-x").focus();
   const track = lb.querySelector(".lb-track");
   const w = () => track.clientWidth;
   requestAnimationFrame(() => { track.scrollLeft = -start * w(); if (track.scrollLeft === 0 && start) track.scrollLeft = start * w(); });
   track.addEventListener("scroll", () => { lb.querySelector(".lb-count span").textContent = Math.round(Math.abs(track.scrollLeft) / w()) + 1; });
-  const close = () => { lb.remove(); document.removeEventListener("keydown", key); };
+  const close = () => { lb.remove(); document.removeEventListener("keydown", key); if (back?.isConnected) back.focus(); };
   const key = e => {
     if (e.key === "Escape") close();
+    if (e.key === "Tab") trapTab(e, lb);
     if (e.key === "ArrowLeft") track.scrollBy({ left: -w(), behavior: "smooth" });
     if (e.key === "ArrowRight") track.scrollBy({ left: w(), behavior: "smooth" });
   };
@@ -478,7 +546,7 @@ function tiersHtml(c, key, cols) {
       ${cols.city ? `<label class="tf tf-city"><span class="tl">עיר</span><input type="text" data-c="${c.id}" data-list="${key}" data-i="${i}" data-f="city" value="${esc(t.city ?? "")}" placeholder="כל עיר"></label>` : "<span></span>"}
       <label class="tf tf-alias"><span class="tl">מילים לזיהוי</span><input type="text" data-c="${c.id}" data-list="${key}" data-i="${i}" data-f="aliases" data-t="list" value="${esc(listVal(t.aliases))}" placeholder="${cols.city ? "ריק = כל העיר" : ""}"></label>
       <label class="tf score"><span class="tl">העדפה</span><input type="range" min="0" max="100" step="5" data-c="${c.id}" data-list="${key}" data-i="${i}" data-f="score" data-t="num" value="${t.score}"><b class="num">${t.score}</b></label>
-      <button class="btn icon sm ghost tier-del" data-cact="delTier" data-list="${key}" data-i="${i}" title="מחק">${icon("x", "sm")}</button>
+      <button class="btn icon sm ghost tier-del" data-cact="delTier" data-list="${key}" data-i="${i}" title="מחק" aria-label="מחק את ${esc(t.name || (cols.city ? "האזור" : "הסוג"))}">${icon("x", "sm")}</button>
     </div>`).join("")}
     <div><button class="btn sm" data-cact="addTier" data-list="${key}">${icon("plus", "sm")}הוסף ${cols.city ? "אזור" : "סוג"}</button></div>`;
 }
@@ -502,7 +570,7 @@ function critBody(c) {
       <label class="field">מילים שפוסלות<input type="text" data-c="${c.id}" data-f="avoid" data-t="list" value="${esc(listVal(c.avoid))}"></label>`;
     case "ai": return `<label class="field">שם קצר (יופיע בכרטיס)<input type="text" data-c="${c.id}" data-f="label" value="${esc(c.label ?? "")}"></label>
       <label class="field">השאלה ל-Claude — תאר במילים שלך מה חשוב ומה נחשב 100 / 0<textarea rows="4" data-c="${c.id}" data-f="question">${esc(c.question ?? "")}</textarea></label>
-      ${S.ai.apiKey ? "" : `<p class="dim">צריך מפתח API כדי שהשאלה תוערך. <a href="#settings">להגדרות</a></p>`}`;
+      ${aiConfigured() ? "" : `<p class="dim">צריך לחבר את Claude (מנוי או מפתח API) כדי שהשאלה תוערך. <a href="#settings">להגדרות</a></p>`}`;
   }
   return "";
 }
@@ -541,7 +609,7 @@ function viewProfile() {
           ${c.kind === "ai" ? `<span class="chip accent">${icon("spark", "sm")}AI</span>` : ""}
           <span class="hint">${esc(CRITERION_KINDS[c.kind].hint)}</span>
           ${impSeg(c)}
-          <button class="btn icon sm ghost" data-cact="delete" title="מחק קריטריון">${icon("trash", "sm")}</button>
+          <button class="btn icon sm ghost" data-cact="delete" title="מחק קריטריון" aria-label="מחק את הקריטריון">${icon("trash", "sm")}</button>
         </div>
         ${c.imp === "off" ? "" : `<div class="crit-body">${critBody(c)}</div>`}
       </div>`).join("")}
@@ -566,17 +634,18 @@ function coerce(el) {
 function viewSources() {
   const q = encodeURIComponent;
   main.innerHTML = `
-    <div class="view-head"><div class="grow"><h1>מקורות</h1><p>כל עמוד כאן נפתח ברקע בטאב שקט (בקבוצת טאבים מקופלת בשם "סורק דירות") ונקרא כמו שאתה רואה אותו.</p></div><span class="saved">נשמר ✓</span></div>
+    <div class="view-head"><div class="grow"><h1>מקורות</h1><p>כל עמוד כאן נפתח ברקע בטאב שקט (בקבוצת טאבים מקופלת בשם "סורק דירות") ונקרא כמו שאתה רואה אותו.</p>
+      <p class="warn-line"><b>לתשומת לבך:</b> הסריקה משתמשת בחשבון שלך (פייסבוק, יד 2, מדלן) ועלולה להפר את תנאי השימוש של האתרים. השימוש באחריותך. פייסבוק נסרק לכל היותר פעם בשעתיים ובכמה קבוצות בכל סבב, כדי להקטין את הסיכון לחסימה.</p></div><span class="saved">נשמר ✓</span></div>
     <section class="panel"><h2>הוספת מקור</h2>
       <p class="sub">הדרך הכי קלה: פותחים באתר חיפוש עם הסינון שרוצים (עיר, סוג נכס, מחיר), לוחצים על אייקון התוסף ובוחרים "הוסף עמוד זה כמקור". אפשר גם להדביק כתובת כאן.</p>
       <div class="row"><input type="url" id="newSrc" class="grow" placeholder="https://www.yad2.co.il/realestate/forsale?... / https://www.facebook.com/groups/..."><button class="btn primary" data-sact="add">הוסף</button></div>
       <br><div class="quick">
-        <a class="btn sm" target="_blank" href="https://www.yad2.co.il/realestate/forsale?city=2500">יד 2: נשר למכירה</a>
-        <a class="btn sm" target="_blank" href="https://www.madlan.co.il/for-sale/%D7%A0%D7%A9%D7%A8-%D7%99%D7%A9%D7%A8%D7%90%D7%9C">מדלן: נשר</a>
-        <a class="btn sm" target="_blank" href="https://www.facebook.com/groups/search/groups/?q=${q("דירות למכירה נשר")}">חפש קבוצות: דירות למכירה נשר</a>
-        <a class="btn sm" target="_blank" href="https://www.facebook.com/groups/search/groups/?q=${q("נדל\"ן חיפה והקריות")}">חפש קבוצות: נדל״ן חיפה והקריות</a>
-        <a class="btn sm" target="_blank" href="https://www.facebook.com/groups/search/groups/?q=${q("יחידת דיור למכירה")}">חפש קבוצות: יחידת דיור</a>
-        <a class="btn sm" target="_blank" href="https://www.facebook.com/marketplace/category/propertyforsale">מרקטפלייס: נכסים למכירה</a>
+        <a class="btn sm" ${EXT} href="https://www.yad2.co.il/realestate/forsale?city=2500">יד 2: נשר למכירה</a>
+        <a class="btn sm" ${EXT} href="https://www.madlan.co.il/for-sale/%D7%A0%D7%A9%D7%A8-%D7%99%D7%A9%D7%A8%D7%90%D7%9C">מדלן: נשר</a>
+        <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("דירות למכירה נשר")}">חפש קבוצות: דירות למכירה נשר</a>
+        <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("נדל\"ן חיפה והקריות")}">חפש קבוצות: נדל״ן חיפה והקריות</a>
+        <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("יחידת דיור למכירה")}">חפש קבוצות: יחידת דיור</a>
+        <a class="btn sm" ${EXT} href="https://www.facebook.com/marketplace/category/propertyforsale">מרקטפלייס: נכסים למכירה</a>
       </div>
     </section>
     <div class="src-list">${S.sources.map(s => {
@@ -584,16 +653,16 @@ function viewSources() {
       const err = st.lastError;
       const blocked = st.blockedUntil > Date.now();
       return `<div class="src ${s.enabled ? "" : "disabled"}" data-sid="${s.id}">
-        <input type="checkbox" data-sf="enabled" ${s.enabled ? "checked" : ""} title="פעיל">
+        <input type="checkbox" data-sf="enabled" ${s.enabled ? "checked" : ""} title="פעיל" aria-label="סריקה פעילה: ${esc(s.name)}">
         <div class="meta">
-          <div class="row"><span class="chip">${SOURCE_TYPES[s.type]?.label ?? s.type}</span><input type="text" class="grow" data-sf="name" value="${esc(s.name)}"></div>
-          <a class="url" href="${esc(s.url)}" target="_blank">${esc(decodeURI(s.url))}</a>
+          <div class="row"><span class="chip">${SOURCE_TYPES[s.type]?.label ?? s.type}</span><input type="text" class="grow" data-sf="name" value="${esc(s.name)}" aria-label="שם המקור"></div>
+          <a class="url" href="${esc(safeUrl(s.url))}" ${EXT}>${esc(decodeURI(s.url))}</a>
           <span class="st ${err || blocked ? "err" : ""}">${st.lastScan ? `נסרק ${ago(st.lastScan)} · ${st.lastCount ?? 0} מודעות · ${st.lastNew ?? 0} חדשות${st.lastRaw !== undefined ? ` · ${st.lastRaw} פוסטים נקראו` : ""}` : "עוד לא נסרק"}${blocked ? " · מושהה: האתר ביקש אימות — פתח אותו ידנית פעם אחת" : ""}${err ? " · " + esc(err) : ""}</span>
         </div>
         <div class="ops">
-          <select data-sf="dealType"><option value="sale" ${s.dealType === "sale" ? "selected" : ""}>קנייה</option><option value="rent" ${s.dealType === "rent" ? "selected" : ""}>שכירות</option></select>
+          <select data-sf="dealType" aria-label="סוג עסקה"><option value="sale" ${s.dealType === "sale" ? "selected" : ""}>קנייה</option><option value="rent" ${s.dealType === "rent" ? "selected" : ""}>שכירות</option></select>
           <button class="btn sm" data-sact="scan">${icon("sync", "sm")}סרוק</button>
-          <button class="btn icon sm ghost danger" data-sact="delete" title="מחק">${icon("trash", "sm")}</button>
+          <button class="btn icon sm ghost danger" data-sact="delete" title="מחק" aria-label="מחק את המקור ${esc(s.name)}">${icon("trash", "sm")}</button>
         </div>
       </div>`;
     }).join("") || `<div class="empty">אין מקורות</div>`}</div>`;
@@ -615,7 +684,6 @@ const bind = (p, type = "text", attrs = "") => {
 };
 
 function viewNotify() {
-  const code = APPS_SCRIPT_CODE.replace("SECRET_HERE", S.notify.email.secret || "SECRET_HERE");
   main.innerHTML = `
     <div class="view-head"><div class="grow"><h1>התראות</h1><p>התראה נשלחת כשדירה חדשה עוברת את סף ההתאמה של פרופיל פעיל (מוגדר בפרופיל), כשיורד מחיר של דירה רלוונטית, וכשנמצאות שתי דירות באותו בניין.</p></div><span class="saved">נשמר ✓</span></div>
 
@@ -633,11 +701,11 @@ function viewNotify() {
     <section class="panel"><h2>טלגרם (מומלץ — מגיע לטלפון עם תמונה וקישור)</h2>
       <ol class="steps">
         <li>בטלגרם, פתח שיחה עם <b>@BotFather</b>, שלח <b>/newbot</b> ותן שם (למשל "צייד הדירות שלי").</li>
-        <li>הוא ישלח לך <b>token</b> — הדבק אותו כאן.</li>
+        <li>הוא ישלח לך <b>token</b>. ${SECRETS_HOW}</li>
         <li>פתח את הבוט החדש ושלח לו הודעה כלשהי (למשל "היי"), ואז לחץ "זהה אותי".</li>
       </ol>
+      <p class="sub">טוקן הבוט: ${setChip(secretOn("telegram"))}</p>
       <div class="form-grid">
-        <label class="field">Bot token${bind("notify.telegram.token", "password", 'autocomplete="off"')}</label>
         <label class="field">Chat ID${bind("notify.telegram.chatId")}</label>
         <div class="row"><button class="btn sm" data-nact="findChat">זהה אותי</button><button class="btn sm" data-nact="test" data-ch="telegram">שלח בדיקה</button></div>
         <label class="check">${bind("notify.telegram.enabled", "checkbox")}פעיל</label>
@@ -646,18 +714,16 @@ function viewNotify() {
     <section class="panel"><h2>מייל</h2>
       <p class="sub">נשלח מחשבון הג׳ימייל שלך דרך סקריפט קטן של גוגל (חינם, בלי שרת). הגדרה חד-פעמית של 3 דקות:</p>
       <ol class="steps">
-        <li>היכנס ל-<a href="https://script.google.com/home/projects/create" target="_blank">script.google.com ← פרויקט חדש</a>.</li>
-        <li>מחק את מה שכתוב שם והדבק את הקוד הזה (הסיסמה שבו כבר תואמת להגדרות כאן):</li>
-      </ol>
-      <pre class="code">${esc(code)}</pre>
-      <div class="row"><button class="btn sm" data-nact="copyCode">${icon("copy", "sm")}העתק קוד</button><button class="btn sm ghost" data-nact="newSecret">צור סיסמה חדשה</button></div><br>
-      <ol class="steps" start="3">
+        <li>מלא כאן למטה את הכתובת שאליה יישלחו המיילים ("לשלוח אל"). הסקריפט ישלח רק אליה, ולכל היותר 50 מיילים ביום.</li>
+        <li>בתוסף במחשב: אייקון התוסף ← "מפתחות וסיסמאות" ← "צור סיסמה חדשה" ← "העתק קוד". הסיסמה נשמרת רק בתוסף, ולכן הקוד מוצג שם ולא כאן.</li>
+        <li>היכנס ל-<a href="https://script.google.com/home/projects/create" ${EXT}>script.google.com ← פרויקט חדש</a>, מחק את מה שכתוב והדבק את הקוד.</li>
         <li>לחץ <b>Deploy ← New deployment ← Web app</b>. ב-"Execute as" בחר <b>Me</b>, וב-"Who has access" בחר <b>Anyone</b>. אשר הרשאות.</li>
         <li>העתק את ה-<b>Web app URL</b> והדבק למטה.</li>
       </ol>
+      <p class="sub">סיסמת הסקריפט: ${setChip(secretOn("emailSecret"))}</p>
       <div class="form-grid">
+        <label class="field">לשלוח אל${bind("notify.email.to", "email", 'placeholder="you@gmail.com" autocomplete="email"')}</label>
         <label class="field">Web app URL${bind("notify.email.url", "url")}</label>
-        <label class="field">לשלוח אל${bind("notify.email.to", "text", 'placeholder="you@gmail.com"')}</label>
         <label class="field">מתי<select data-p2="notify.email.mode"><option value="digest" ${S.notify.email.mode === "digest" ? "selected" : ""}>סיכום יומי ב-20:00</option><option value="instant" ${S.notify.email.mode === "instant" ? "selected" : ""}>מיד</option></select></label>
         <div class="row"><label class="check">${bind("notify.email.enabled", "checkbox")}פעיל</label><button class="btn sm" data-nact="test" data-ch="email">שלח בדיקה</button></div>
       </div></section>`;
@@ -700,8 +766,10 @@ async function viewSettings() {
         ? `<p style="margin-top:12px"><span class="chip ${SC.aiHost?.ok ? "ok" : "fail"}">${SC.aiHost?.ok ? `מחובר · ${esc(SC.aiHost.version ?? "")}` : SC.aiHost ? "לא מחובר" : "עוד לא נבדק"}</span>
             ${SC.aiHost && !SC.aiHost.ok ? `<span class="dim">${esc(SC.aiHost.error ?? "")}</span>` : ""}</p>
            <p class="dim" style="margin-top:8px">עובד דרך Claude Code שמותקן במחשב שבו רץ הסורק, על המנוי הקיים. נספר במגבלת השימוש הרגילה של המנוי (כמה עשרות קריאות קצרות ביום). התקנה חד-פעמית של הגשר: <b>node native/install.mjs</b> בתיקיית הפרויקט.</p>`
-        : `<div class="form-grid" style="margin-top:12px"><label class="field">מפתח API${bind("ai.apiKey", "password", 'autocomplete="off" placeholder="sk-ant-..."')}</label></div>
-           <p class="dim" style="margin-top:6px">מפתח יוצרים ב-<a href="https://platform.claude.com/settings/keys" target="_blank">platform.claude.com</a>. חיוב נפרד מהמנוי.</p>`}
+        : `<p style="margin-top:12px">מפתח API: ${setChip(secretOn("apiKey"))}</p>
+           <p class="dim" style="margin-top:6px">${SECRETS_HOW} מפתח יוצרים ב-<a href="https://platform.claude.com/settings/keys" ${EXT}>platform.claude.com</a>. חיוב נפרד מהמנוי.
+             מומלץ לקבוע גם תקרת הוצאה חודשית למפתח עצמו ב-Anthropic Console (Settings ← Limits), כגיבוי לתקרה שכאן.</p>
+           <div class="form-grid" style="margin-top:8px"><label class="field">תקרת הוצאה בחודש ($)${bind("ai.monthlyUsdCap", "number", 'min="0" step="1"')}</label></div>`}
       <br><div class="row"><button class="btn sm" data-gact="testAi">בדוק חיבור</button><button class="btn sm" data-gact="evalNow">${icon("spark", "sm")}הערך עכשיו מודעות שממתינות</button>
         <span class="muted">היום: <span class="num">${u.day === new Date().toISOString().slice(0, 10) ? u.calls : 0}</span> קריאות${S.ai.provider === "api" ? ` · החודש: כ-$<span class="num">${thisMonth ? u.usd.toFixed(2) : "0.00"}</span>` : " · ללא עלות (מנוי)"}</span></div>
       <p class="dim" id="aiResult" style="margin-top:8px"></p>
@@ -711,7 +779,8 @@ async function viewSettings() {
       <p class="sub">הסריקה רצה ברקע כל עוד Chrome פתוח (גם ממוזער). פייסבוק נסרק לאט יותר בכוונה, כדי לא לסכן את החשבון.</p>
       <div class="form-grid">
         <label class="field">יד 2 / מדלן: כל כמה דקות${bind("scan.intervalMin", "number", 'min="10"')}</label>
-        <label class="field">פייסבוק: כל כמה דקות${bind("scan.fbIntervalMin", "number", 'min="30"')}</label>
+        <label class="field">פייסבוק: כל כמה דקות (120 לפחות)${bind("scan.fbIntervalMin", "number", 'min="120"')}</label>
+        <label class="field">קבוצות פייסבוק בכל סבב (עד 6)${bind("scan.fbMaxPerRound", "number", 'min="1" max="6"')}</label>
         <label class="field">עמודי תוצאות לכל מקור${bind("scan.pagesPerSource", "number", 'min="1" max="5"')}</label>
         <label class="field">גלילות בכל קבוצת פייסבוק${bind("scan.fbScrolls", "number", 'min="1" max="20"')}</label>
         <label class="field">כמה מודעות להעשיר בכל סבב${bind("scan.enrichMax", "number")}</label>
@@ -744,7 +813,64 @@ async function viewSettings() {
       <b>מחשב:</b> ב-Chrome, אייקון ההתקנה בשורת הכתובת.</p></section>
 
     <section class="panel"><h2>חשבון</h2>
-      <div class="row"><span class="muted grow">מחובר: <span id="whoSettings">${esc($("#who").textContent)}</span></span><button class="btn sm" data-gact="logout">התנתק</button></div></section>`;
+      <div class="row"><span class="muted grow">מחובר: <span id="whoSettings">${esc($("#who").textContent)}</span></span><button class="btn sm" data-gact="logout">התנתק</button></div>
+      <br><form class="row" id="pwForm">
+        <input type="password" name="pw" class="grow" placeholder="סיסמה חדשה (10 תווים לפחות)" autocomplete="new-password" minlength="10" required aria-label="סיסמה חדשה">
+        <button class="btn sm" type="submit">החלף סיסמה</button></form>
+      <p class="dim" style="margin-top:8px"><a href="privacy.html" ${EXT}>מדיניות פרטיות</a></p></section>
+
+    <section class="panel"><h2>מחיקת החשבון וכל הנתונים</h2>
+      <p class="sub">מוחק מהענן את כל מה ששייך לחשבון הזה: הגדרות, פרופילים, מקורות, מודעות, מועדפים, הערות, יומן ומצב הסורק. אי אפשר לבטל.
+        שם המשתמש עצמו (המייל והסיסמה) נמחק בנפרד על ידי מי שהזמין אותך — אחרי המחיקה כאן, שלח לו בקשה. בתוסף במחשב כדאי גם להתנתק ולהסיר אותו מ-Chrome.</p>
+      <div class="row"><button class="btn sm danger" data-gact="deleteAccount">${icon("trash", "sm")}מחיקת החשבון וכל הנתונים</button></div></section>`;
+  $("#pwForm").onsubmit = changePassword;
+}
+
+/* ======================= לא רלוונטיות + מה למדתי ======================= */
+
+/** הצעות לכיוונון הפרופיל לפי הסיבות שסימנת (רק כשסיבה חוזרת לפחות פעמיים). */
+function learnings(rej) {
+  const P = profile();
+  const n = k => rej.filter(l => l.user?.rejectReason === k).length;
+  const crit = (kind, re) => P.criteria.find(c => c.kind === kind && (!re || re.test(c.label ?? "")));
+  const out = [];
+  const raise = (c, label, k) => {
+    if (c && c.imp !== "must") out.push({ text: `${n(k)} דירות נפסלו בגלל "${REJECT_REASONS[k]}". להפוך את "${label}" לחובה? דירות שנכשלות בזה ירדו לתחתית ולא יתריעו.`, apply: () => { c.imp = "must"; } });
+  };
+  if (n("stairs") >= 2) raise(crit("ai", /נגיש/), crit("ai", /נגיש/)?.label ?? "נגישות", "stairs");
+  if (n("no_unit") >= 2) raise(crit("ai", /יחיד/), crit("ai", /יחיד/)?.label ?? "שתי יחידות", "no_unit");
+  const price = crit("price");
+  if (n("price") >= 2 && price?.tolerancePct > 0) out.push({ text: `${n("price")} דירות נפסלו כי הן יקרות מדי. לבטל את המרווח של ${price.tolerancePct}% מעל התקרה (${fmtPrice(price.max)})?`, apply: () => { price.tolerancePct = 0; } });
+  const rooms = crit("rooms");
+  if (n("size") >= 2 && rooms) out.push({ text: `${n("size")} דירות נפסלו כקטנות מדי. להעלות את מינימום החדרים ל-${(rooms.min ?? 3) + 0.5}?`, apply: () => { rooms.min = (rooms.min ?? 3) + 0.5; } });
+  const loc = crit("location");
+  if (n("area") >= 2 && loc) {
+    const nbs = {};
+    for (const l of rej.filter(l => l.user?.rejectReason === "area")) if (l.neighborhood) nbs[l.neighborhood] = (nbs[l.neighborhood] ?? 0) + 1;
+    const [nb, cnt] = Object.entries(nbs).sort((a, b) => b[1] - a[1])[0] ?? [];
+    const area = nb && loc.areas.find(a => [a.name, ...(a.aliases ?? [])].some(x => x && (nb.includes(x) || x.includes(nb))));
+    if (area && cnt >= 2 && area.score > 0) out.push({ text: `${cnt} דירות ב${nb} נפסלו בגלל המיקום. להוריד את ההעדפה של "${area.name}" מ-${area.score} ל-${Math.max(0, area.score - 25)}?`, apply: () => { area.score = Math.max(0, area.score - 25); } });
+  }
+  if (n("condition") >= 2 && !P.criteria.some(c => c.kind === "feature" && c.feature === "renovated")) out.push({ text: `${n("condition")} דירות נפסלו בגלל מצב הנכס. להוסיף קריטריון "משופצת / חדשה" (חשוב)?`, apply: () => { P.criteria.push({ ...newCriterion("feature"), feature: "renovated", imp: "medium" }); } });
+  return out;
+}
+
+let SUGG = [];
+function viewRejected() {
+  const P = profile();
+  const rej = V.filter(l => l.user?.status === "rejected").sort((a, b) => (b.user.rejectedAt ?? 0) - (a.user.rejectedAt ?? 0));
+  const byReason = [...Object.entries(REJECT_REASONS).map(([k, v]) => [v, rej.filter(l => l.user.rejectReason === k).length]),
+    ["בלי סיבה", rej.filter(l => !l.user.rejectReason).length]].filter(([, c]) => c);
+  SUGG = learnings(rej);
+  main.innerHTML = `
+    <div class="view-head"><div class="grow"><h1>לא רלוונטיות</h1><p>דירות שסימנת כלא רלוונטיות. הן לא מופיעות ברשימה ולא יגיעו בהתראות — גם אם יפורסמו שוב במקור אחר.</p></div></div>
+    ${rej.length ? `<section class="panel"><h2>מה למדתי מהסימונים שלך</h2>
+      <div class="summary">${byReason.map(([v, c]) => `<span class="chip">${esc(v)}: <span class="num">${c}</span></span>`).join("")}</div>
+      ${SUGG.length ? SUGG.map((s, i) => `<div class="sugg"><span class="grow">${esc(s.text)}</span><button class="btn sm primary" data-act="applySugg" data-i="${i}">החל</button></div>`).join("")
+        : `<p class="dim">כשסיבה תחזור על עצמה כמה פעמים, אציע כאן לכוונן את הפרופיל בהתאם.</p>`}
+    </section>
+    <div class="grid">${rej.map(l => card(l, scoreListing(l, P) ?? { pct: 0, breakdown: [], confidence: 0 })).join("")}</div>`
+    : `<div class="empty"><h2>עוד לא סימנת דירות כלא רלוונטיות</h2><p>בכרטיס של דירה לוחצים על ${icon("ban", "sm")} ובוחרים סיבה. היא יורדת מהרשימה, ומהסיבות אלמד מה פחות מתאים לכם.</p></div>`}`;
 }
 
 /* ======================= עוד (נייד) ======================= */
@@ -762,6 +888,7 @@ function viewMore() {
       ${item("#sources", "source", "מקורות", `${S.sources.filter(s => s.enabled).length} פעילים`)}
       ${item("#notify", "bell", "התראות", S.notify.telegram.enabled ? "טלגרם מחובר" : "")}
       ${item("#settings", "settings", "AI וכללי", "")}
+      ${item("#rejected", "ban", "לא רלוונטיות", `${V.filter(l => l.user?.status === "rejected").length} דירות · מה למדתי`)}
       ${item("#log", "log", "יומן סריקות", "")}
     </nav>
     <p class="dim more-who">מחובר: ${esc($("#who").textContent)} · <a href="#" data-gact="logout">התנתק</a></p>`;
@@ -812,12 +939,66 @@ $("#drawer").addEventListener("input", e => {
   if (!id) return;
   clearTimeout(e.target._t);
   e.target._t = setTimeout(async () => {
-    const l = L.find(x => x.id === id);
-    if (l) l.user = { ...l.user, note: e.target.value };
-    await db.updateUser(id, { note: e.target.value });
+    const l = viewOf(id);
+    if (l) await setUser(l, { note: e.target.value });
   }, 400);
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+document.addEventListener("keydown", e => {
+  // כשהתמונות פתוחות מעל המגירה — Esc ו-Tab שייכים להן (יש להן טיפול משלהן)
+  if ($("#drawer").hidden || document.querySelector(".lightbox")) return;
+  if (e.key === "Escape") closeDrawer();
+  if (e.key === "Tab") trapTab(e, $("#drawer .drawer-panel"));
+  // תמונה בגלריה היא "כפתור": Enter או רווח מגדילים אותה
+  const z = e.target.closest?.("[data-zoom]");
+  if (z && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); z.click(); }
+});
+
+/** עדכון מצב משתמש לדירה — חל על כל העותקים שלה (מקורות שונים), כדי שהכרטיס המאוחד יישאר עקבי. */
+async function setUser(l, patch) {
+  const ids = l.members?.length ? l.members : [l.id];
+  for (const mid of ids) { const x = L.find(y => y.id === mid); if (x) x.user = { ...x.user, ...patch }; }
+  l.user = { ...l.user, ...patch };
+  await Promise.all(ids.map(mid => db.updateUser(mid, patch)));
+  remerge(l.id);
+}
+
+/** "למה זה לא רלוונטי?" — סיבה מהירה + הערה חופשית. מהסיבות לומדים (עמוד "נפסלו"). */
+function openRejectSheet(l, inDrawer) {
+  const box = document.createElement("div");
+  box.className = "sheet";
+  box.innerHTML = `<div class="sheet-scrim" data-sclose></div>
+    <form class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rjTitle">
+      <h2 id="rjTitle">למה היא לא רלוונטית?</h2>
+      <p class="muted">${esc(facts(l) || l.title || "")} · ${esc(place(l))}</p>
+      <div class="reasons">${Object.entries(REJECT_REASONS).map(([k, v], i) => `<label class="reason"><input type="radio" name="r" value="${k}" ${i === 0 ? "" : ""}><span>${esc(v)}</span></label>`).join("")}</div>
+      <textarea name="note" rows="2" placeholder="משהו להוסיף? (לא חובה) — למשל: המוכר רוצה למכור רק בעוד שנה" aria-label="הערה"></textarea>
+      <div class="sheet-actions">
+        <button class="btn primary" type="submit">${icon("ban", "sm")}סמן כלא רלוונטית</button>
+        <button class="btn ghost" type="button" data-sclose>ביטול</button>
+      </div>
+      ${(l.members?.length ?? 1) > 1 ? `<p class="dim">חל על כל ${l.members.length} המודעות של הדירה הזו.</p>` : ""}
+    </form>`;
+  document.body.append(box);
+  const close = () => { box.remove(); document.removeEventListener("keydown", key); };
+  const key = e => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", key);
+  box.addEventListener("click", e => { if (e.target.closest("[data-sclose]")) close(); });
+  box.querySelector("form").onsubmit = async e => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const before = { status: l.user?.status ?? "new", fav: !!l.user?.fav };
+    await setUser(l, { status: "rejected", rejectReason: f.get("r") || null, rejectNote: (f.get("note") || "").trim() || null, rejectedAt: Date.now(), seen: true, fav: false });
+    close();
+    if (inDrawer) closeDrawer();
+    renderCounts();
+    const y = main.scrollTop; route(); main.scrollTop = y;
+    toast("סומנה כלא רלוונטית", false, { label: "בטל", run: async () => {
+      await setUser(l, { ...before, rejectReason: null, rejectNote: null, rejectedAt: null });
+      renderCounts(); const y2 = main.scrollTop; route(); main.scrollTop = y2;
+    } });
+  };
+  box.querySelector("input[name=r]").focus();
+}
 
 async function listingAction(act, el, id, inDrawer = false) {
   if (act === "scanNow") return scanNow();
@@ -828,24 +1009,33 @@ async function listingAction(act, el, id, inDrawer = false) {
     saveUi(); return route();
   }
   if (act === "clearFilters") { Object.assign(UI, { maxPrice: "", minRooms: "", nb: "", ptype: "", sources: [], onlyNew: false }); saveUi(); return route(); }
+  if (act === "applySugg") {
+    const s = SUGG[Number(el.dataset.i)];
+    if (!s) return;
+    s.apply(); await persist(true); toast("הפרופיל עודכן"); renderCounts(); return route();
+  }
   if (act === "toggleFilters") { UI.filtersOpen = !UI.filtersOpen; saveUi(); return route(); }
   if (act === "markAllSeen") {
     const ids = L.filter(l => !l.user?.seen).map(l => l.id);
     for (const id of ids) { await db.updateUser(id, { seen: true }); L.find(l => l.id === id).user.seen = true; }
+    buildView();
     renderCounts(); return route();
   }
-  const l = L.find(x => x.id === id);
+  const l = viewOf(id);
   if (!l) return;
-  const upd = async patch => { l.user = { ...l.user, ...patch }; await db.updateUser(id, patch); };
+  id = l.id;
+  const upd = patch => setUser(l, patch);
   if (act === "fav") await upd({ fav: !l.user?.fav, seen: true });
   if (act === "hide") await upd({ hidden: !l.user?.hidden, seen: true });
-  if (act === "status") await upd({ status: el.value, seen: true, fav: el.value !== "new" && el.value !== "rejected" ? true : l.user?.fav });
-  if (act === "open") { await upd({ seen: true }); window.open(l.url, "_blank"); }
-  if (act === "wa") { await upd({ seen: true }); window.open(waLink(l), "_blank"); }
+  if (act === "reject" || (act === "status" && el.value === "rejected")) return openRejectSheet(l, inDrawer);
+  if (act === "unreject") { await upd({ status: "new", rejectReason: null, rejectNote: null, rejectedAt: null, hidden: false }); toast("הדירה חזרה לרשימה"); }
+  if (act === "status") await upd({ status: el.value, seen: true, fav: el.value !== "new" ? true : l.user?.fav });
+  if (act === "open") { await upd({ seen: true }); window.open(safeUrl(l.url), "_blank", "noopener,noreferrer"); }
+  if (act === "wa") { await upd({ seen: true }); window.open(waLink(l), "_blank", "noopener,noreferrer"); }
   renderCounts();
   if (inDrawer) { if (act === "hide") closeDrawer(); else openDrawer(id); }
   const [view] = (location.hash.slice(1) || "listings").split("/");
-  if (["listings", "favorites", "pairs"].includes(view) && act !== "open" && act !== "wa") {
+  if (["listings", "favorites", "pairs", "rejected"].includes(view) && act !== "open" && act !== "wa") {
     const y = main.scrollTop; route(); main.scrollTop = y;
   }
 }
@@ -898,7 +1088,6 @@ function settingField(t) {
   pathSet(t.dataset.p2, coerce(t));
   persist();
   if (t.dataset.p2 === "ai.provider") { persist(true); viewSettings(); return; }
-  if (t.dataset.p2 === "notify.email.secret") route();
 }
 
 function sourceField(t) {
@@ -1004,28 +1193,14 @@ async function notifyAction(act, t) {
     toast(r?.ok ? "נשלח" : r?.error ?? "שגיאה", !r?.ok);
   }
   if (act === "findChat") {
+    // הטוקן נמצא רק בתוסף במחשב, אז הזיהוי רץ שם; לכאן חוזר רק ה-chat id
     await persist(true);
-    let chat = null;
-    try {
-      const j = await (await fetch(`https://api.telegram.org/bot${S.notify.telegram.token}/getUpdates`)).json();
-      if (!j.ok) return toast(`טלגרם: ${j.description ?? "token לא תקין"}`, true);
-      const m = [...j.result].reverse().find(u => u.message?.chat?.id)?.message;
-      chat = m && { id: String(m.chat.id), name: m.chat.first_name ?? m.chat.title ?? "" };
-    } catch (e) { return toast("טלגרם: " + e.message, true); }
-    if (!chat) return toast("לא נמצאה הודעה. שלח לבוט הודעה ונסה שוב.", true);
-    S.notify.telegram.chatId = chat.id; S.notify.telegram.enabled = true;
-    await persist(true);
-    toast(`זוהה: ${chat.name}`);
-    viewNotify();
-  }
-  if (act === "copyCode") {
-    await navigator.clipboard.writeText(APPS_SCRIPT_CODE.replace("SECRET_HERE", S.notify.email.secret || "SECRET_HERE"));
-    toast("הקוד הועתק");
-  }
-  if (act === "newSecret") {
-    S.notify.email.secret = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
-    await persist(true);
-    toast("נוצרה סיסמה — העתק את הקוד מחדש לסקריפט");
+    if (!db.scannerOnline(SC)) return toast("הזיהוי רץ בסורק במחשב, והוא לא מחובר כרגע", true);
+    toast("מחפש את ההודעה לבוט דרך הסורק במחשב…");
+    const r = await db.command("findChat", {}, { wait: true });
+    if (!r?.ok) return toast(r?.error ?? "שגיאה", true);
+    S = await db.getSettings();
+    toast(`זוהה: ${r.result?.name || r.result?.id || ""}`);
     viewNotify();
   }
 }
@@ -1047,6 +1222,16 @@ async function generalAction(act) {
     toast(r?.ok ? `הוערכו ${r.result.evaluated} מודעות` : r?.error, !r?.ok);
     await refreshData();
   }
+  if (act === "deleteAccount") {
+    if (!confirm("למחוק את כל הנתונים של החשבון הזה מהענן? אי אפשר לבטל את זה.")) return;
+    if (prompt('כדי לאשר, כתוב: מחק') !== "מחק") return toast("המחיקה בוטלה");
+    try { await db.deleteAccountData(); }
+    catch (e) { return toast("המחיקה נכשלה: " + e.message, true); }
+    try { localStorage.removeItem("ui"); } catch {}
+    await db.signOut();
+    alert("כל הנתונים נמחקו מהענן. כדי למחוק גם את שם המשתמש (המייל), שלח בקשה למי שהזמין אותך.");
+    location.hash = ""; location.reload();
+  }
   if (act === "export") {
     const clean = structuredClone(S);
     clean.ai.apiKey = ""; clean.notify.telegram.token = ""; clean.notify.email.secret = "";
@@ -1056,9 +1241,8 @@ async function generalAction(act) {
     const j = await pickFile().catch(() => null);
     if (j?.type !== "apt-hunter-backup") return toast("קובץ גיבוי לא תקין", true);
     if (!confirm(`לייבא ${j.listings?.length ?? 0} מודעות והגדרות? ההגדרות הנוכחיות יוחלפו (מפתחות נשמרים).`)) return;
-    const keep = { apiKey: S.ai.apiKey, token: S.notify.telegram.token, secret: S.notify.email.secret };
+    // המפתחות והסיסמאות לא בקובץ ולא בענן — הם בתוסף במחשב ולא מושפעים מהייבוא
     S = { ...j.settings };
-    S.ai.apiKey ||= keep.apiKey; S.notify.telegram.token ||= keep.token; S.notify.email.secret ||= keep.secret;
     await persist(true);
     toast("מייבא…");
     await db.importListings(j.listings ?? []);
@@ -1070,6 +1254,13 @@ async function generalAction(act) {
     await db.deleteListings(L.map(l => l.id));
     await refreshData(); toast("נמחק");
   }
+}
+
+async function changePassword(e) {
+  e.preventDefault();
+  const pw = new FormData(e.target).get("pw");
+  try { await db.updatePassword(pw); e.target.reset(); toast("הסיסמה הוחלפה"); }
+  catch (err) { toast(err.message, true); }
 }
 
 /* ======================= סריקה וסטטוס ======================= */
@@ -1096,6 +1287,7 @@ $("#q").addEventListener("input", e => {
 
 async function refreshData() {
   try { L = await db.allListings(); } catch (e) { return toast("טעינה נכשלה: " + e.message, true); }
+  buildView();
   buildAreaStats();
   renderCounts();
   const [view] = (location.hash.slice(1) || "listings").split("/");
@@ -1130,19 +1322,22 @@ async function pollStatus() {
 
 /* ======================= התחברות והפעלה ======================= */
 
-function authScreen(mode = "login", msg = "") {
+/* ההרשמה סגורה: הכניסה בהזמנה בלבד. משתמשים חדשים נוצרים על ידי בעל הפרויקט (build/mkuser.mjs),
+   כי הרשמה פתוחה אפשרה לכל אחד לפתוח חשבון — גם עם כתובת של מישהו אחר — ולמלא את המסד. */
+function authScreen(msg = "") {
   document.body.classList.add("auth-mode");
   main.innerHTML = `<div class="auth">
     <img src="icons/192.png" alt="">
     <h1>צייד הדירות</h1>
     <p class="muted">כל הדירות מיד 2, מדלן ופייסבוק במקום אחד, מדורגות לפי מה שחשוב לך.</p>
     <form id="authForm">
-      <input type="email" name="email" placeholder="אימייל" autocomplete="username" required>
-      <input type="password" name="password" placeholder="סיסמה (6 תווים לפחות)" autocomplete="${mode === "login" ? "current-password" : "new-password"}" minlength="6" required>
-      <button class="btn primary" type="submit">${mode === "login" ? "כניסה" : "יצירת משתמש"}</button>
-      <p class="auth-msg ${msg ? "show" : ""}">${esc(msg)}</p>
+      <input type="email" name="email" placeholder="אימייל" aria-label="אימייל" autocomplete="username" required>
+      <input type="password" name="password" placeholder="סיסמה" aria-label="סיסמה" autocomplete="current-password" required>
+      <button class="btn primary" type="submit">כניסה</button>
+      <p class="auth-msg ${msg ? "show" : ""}" role="alert">${esc(msg)}</p>
     </form>
-    <p class="dim">${mode === "login" ? `אין משתמש? <a href="#signup">הרשמה</a>` : `כבר יש משתמש? <a href="#login">כניסה</a>`}</p>
+    <p class="dim">הכניסה בהזמנה בלבד. אין לך משתמש? בקש ממי שהזמין אותך.</p>
+    <p class="dim"><a href="privacy.html" ${EXT}>מדיניות פרטיות: מה נשמר ומי רואה</a></p>
   </div>`;
   $("#authForm").onsubmit = async e => {
     e.preventDefault();
@@ -1150,22 +1345,13 @@ function authScreen(mode = "login", msg = "") {
     const btn = e.target.querySelector("button");
     btn.disabled = true;
     try {
-      if (mode === "login") await db.signIn(f.get("email"), f.get("password"));
-      else {
-        const r = await db.signUp(f.get("email"), f.get("password"));
-        // המשתמש מאושר אוטומטית במסד (טריגר), אז מתחברים מיד גם אם Supabase ביקש אימות מייל
-        if (r.needsConfirm) {
-          try { await db.signIn(f.get("email"), f.get("password")); }
-          catch { return authScreen("login", "נשלח אליך מייל אימות. אחרי האישור — היכנס כאן."); }
-        }
-      }
+      await db.signIn(f.get("email"), f.get("password"));
       location.hash = "";
       boot();
     } catch (err) {
       btn.disabled = false;
       const m = /invalid login/i.test(err.message) ? "אימייל או סיסמה שגויים"
-        : /already registered/i.test(err.message) ? "המשתמש כבר קיים — היכנס"
-        : /not confirmed/i.test(err.message) ? "צריך לאשר את המייל קודם (בדוק את תיבת הדואר)" : err.message;
+        : /not confirmed/i.test(err.message) ? "המשתמש עוד לא אושר. פנה למי שהזמין אותך." : err.message;
       $(".auth-msg").textContent = m;
       $(".auth-msg").classList.add("show");
     }
@@ -1197,7 +1383,7 @@ async function boot() {
   db.init();
   const u = await db.user();
   const [view] = location.hash.slice(1).split("/");
-  if (!u) return authScreen(view === "signup" ? "signup" : "login");
+  if (!u) return authScreen();
   S = await db.getSettings();
   if (!S) { document.body.classList.add("auth-mode"); return firstRun(); }
   document.body.classList.remove("auth-mode");
@@ -1218,7 +1404,7 @@ async function boot() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S) { pollStatus(); refreshData(); } });
 window.addEventListener("hashchange", () => {
   const [v] = location.hash.slice(1).split("/");
-  if (document.body.classList.contains("auth-mode")) { if (v === "signup" || v === "login") authScreen(v); return; }
+  if (document.body.classList.contains("auth-mode")) return;
   if (S) route();
 });
 

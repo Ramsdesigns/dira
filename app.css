@@ -232,6 +232,31 @@ body.auth-mode .app{grid-template-columns:1fr;grid-template-rows:1fr}
 .tpl{display:grid;grid-template-columns:1fr 1fr;gap:10px;width:100%;margin-top:10px}
 .tpl .btn{height:64px;justify-content:center;white-space:normal;text-align:center;font-size:var(--fs-base)}
 
+
+/* ---------- לא רלוונטי: גיליון סיבות, תגיות, מה למדתי ---------- */
+.badge.multi{background:oklch(0.7 0.1 200);color:oklch(0.18 0.05 200)}
+.reject-line{font-size:var(--fs-xs);color:var(--bad);display:flex;gap:6px;align-items:flex-start}
+.reject-box{display:flex;gap:10px;align-items:flex-start;color:var(--bad)}
+.reject-box p{color:var(--text-2);font-size:var(--fs-sm)}
+.sugg{display:flex;gap:12px;align-items:center;padding:10px 12px;margin-top:8px;background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:var(--r-md);font-size:var(--fs-sm)}
+.sheet{position:fixed;inset:0;z-index:90}
+.sheet-scrim{position:absolute;inset:0;background:#000a;animation:fade .2s}
+.sheet-panel{position:absolute;inset-inline:0;bottom:0;margin:0 auto;max-width:520px;background:var(--surface);border:1px solid var(--line);border-bottom:0;
+  border-radius:18px 18px 0 0;padding:18px 18px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px;animation:up .22s var(--ease);max-height:92dvh;overflow:auto}
+@keyframes up{from{transform:translateY(30px);opacity:0}}
+.sheet-panel h2{font-size:var(--fs-lg)}
+.reasons{display:flex;flex-wrap:wrap;gap:8px}
+.reason{cursor:pointer}
+.reason input{position:absolute;opacity:0;pointer-events:none}
+.reason span{display:inline-flex;align-items:center;min-height:36px;padding:6px 12px;border-radius:99px;border:1px solid var(--line);background:var(--raised);font-size:var(--fs-sm);transition:background var(--t),border-color var(--t)}
+.reason input:checked+span{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+.reason input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.sheet-panel textarea{width:100%}
+.sheet-actions{display:flex;gap:8px}
+.sheet-actions .btn{flex:1;justify-content:center;height:42px}
+.toast{display:flex;align-items:center;gap:14px}
+.toast-act{background:none;border:0;color:var(--accent);font:inherit;font-weight:700;cursor:pointer;padding:0}
+
 /* =====================================================================
    נייד
    ===================================================================== */
@@ -348,3 +373,6 @@ body.auth-mode .app{grid-template-columns:1fr;grid-template-rows:1fr}
   .auth{margin-top:6vh;padding:0 8px}
   .tpl{grid-template-columns:1fr}
 }
+
+/* אזהרת תנאי שימוש במסך המקורות */
+.warn-line{margin-top:8px;padding:8px 12px;border-radius:var(--r-md);background:var(--warn-soft);color:var(--text-2);font-size:var(--fs-sm);line-height:1.5}

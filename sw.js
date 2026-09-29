@@ -1,7 +1,7 @@
 /* sw.js — שומר את קבצי האפליקציה לפתיחה מהירה ובלי רשת. הנתונים עצמם תמיד מהענן (לא נשמרים כאן). */
-const VERSION = "20260927211555";
+const VERSION = "20260929150417";
 const SHELL = ["./", "index.html", "app.js", "app.css", "ui.css", "manifest.webmanifest",
-  "lib/store.js", "lib/cloud.js", "lib/config.js", "lib/model.js", "lib/score.js", "lib/text.js",
+  "lib/store.js", "lib/cloud.js", "lib/config.js", "lib/model.js", "lib/score.js", "lib/text.js", "lib/dedup.js",
   "vendor/supabase.js", "icons/192.png", "icons/48.png"];
 
 self.addEventListener("install", e => {

@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- GitHub Pages לא מאפשר כותרות אבטחה, אז המדיניות כאן. הכתובת של Supabase מתעדכנת לבד מ-build/config.json (build.mjs).
+     style-src 'unsafe-inline': האפליקציה משתמשת במאפייני style בתוך ה-HTML (צבע הציון, רוחב וכו').
+     img-src https: — תמונות המודעות מגיעות מיד 2, מדלן ופייסבוק. frame-ancestors לא עובד ב-meta ולכן לא מופיע. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; connect-src 'self' https://radkgcnrcioicggrpmfz.supabase.co wss://radkgcnrcioicggrpmfz.supabase.co; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow">
 <title>צייד הדירות</title>
 <meta name="description" content="כל הדירות מיד 2, מדלן ופייסבוק במקום אחד, מדורגות לפי מה שחשוב לך.">
 <meta name="theme-color" content="#1c1f28">
@@ -17,7 +23,7 @@
 </head>
 <body>
 
-<svg class="sprite" aria-hidden="true">
+<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 11 12 3.5l8.5 7.5"/><path d="M5.5 9.5v11h13v-11"/><path d="M10 20.5v-6h4v6"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.2 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 17l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/></symbol>
   <symbol id="i-pair" viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="17" rx="1.5"/><path d="M5 12h14"/><path d="M9 7.5h2M13 7.5h2M9 16h2M13 16h2"/></symbol>
@@ -39,6 +45,8 @@
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6.5 9.2 17.3 4 12.1"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5 19.5 12 7 19.5z"/></symbol>
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 4.5v15M15.5 4.5v15"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></symbol>
   <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8z"/><path d="M19 16v4M17 18h4"/></symbol>
@@ -48,16 +56,16 @@
   <header class="topbar">
     <div class="brand"><img src="icons/48.png" alt=""><span>צייד הדירות</span></div>
     <label class="profile-pick" title="פרופיל חיפוש">
-      <select id="profileSel"></select>
+      <select id="profileSel" aria-label="פרופיל חיפוש"></select>
     </label>
-    <div class="search"><svg class="ico sm"><use href="#i-search"/></svg><input type="search" id="q" placeholder="חיפוש חופשי: רחוב, שכונה, מילה במודעה…"></div>
+    <div class="search"><svg class="ico sm"><use href="#i-search"/></svg><input type="search" id="q" aria-label="חיפוש חופשי" placeholder="חיפוש חופשי: רחוב, שכונה, מילה במודעה…"></div>
     <div class="grow"></div>
     <span class="scan-status" id="scanStatus"></span>
     <button class="btn icon mobile-only" id="searchBtn" title="חיפוש" aria-label="חיפוש"><svg class="ico"><use href="#i-search"/></svg></button>
-    <button class="btn primary" id="scanBtn" title="סרוק עכשיו"><svg class="ico sm"><use href="#i-sync"/></svg><span>סרוק עכשיו</span><i class="scan-dot" id="scanDot"></i></button>
+    <button class="btn primary" id="scanBtn" title="סרוק עכשיו" aria-label="סרוק עכשיו"><svg class="ico sm"><use href="#i-sync"/></svg><span>סרוק עכשיו</span><i class="scan-dot" id="scanDot"></i></button>
   </header>
 
-  <nav class="rail" id="rail">
+  <nav class="rail" id="rail" aria-label="ניווט ראשי">
     <a href="#listings" data-view="listings"><svg class="ico"><use href="#i-home"/></svg><span>דירות</span><i>דירות</i><em id="cntListings"></em></a>
     <a href="#favorites" data-view="favorites"><svg class="ico"><use href="#i-star"/></svg><span>מועדפים</span><i>מועדפים</i><em id="cntFav"></em></a>
     <a href="#pairs" data-view="pairs"><svg class="ico"><use href="#i-pair"/></svg><span>שתי דירות בבניין</span><i>זוגות</i><em id="cntPairs"></em></a>
@@ -66,6 +74,7 @@
     <a href="#sources" data-view="sources" class="secondary"><svg class="ico"><use href="#i-source"/></svg><span>מקורות</span><i>מקורות</i><em id="cntSources"></em></a>
     <a href="#notify" data-view="notify" class="secondary"><svg class="ico"><use href="#i-bell"/></svg><span>התראות</span><i>התראות</i></a>
     <a href="#settings" data-view="settings" class="secondary"><svg class="ico"><use href="#i-settings"/></svg><span>AI וכללי</span><i>הגדרות</i></a>
+    <a href="#rejected" data-view="rejected" class="secondary"><svg class="ico"><use href="#i-ban"/></svg><span>לא רלוונטיות</span><i>נפסלו</i><em id="cntRejected"></em></a>
     <a href="#log" data-view="log" class="secondary"><svg class="ico"><use href="#i-log"/></svg><span>יומן סריקות</span><i>יומן</i></a>
     <a href="#more" data-view="more" class="more-tab"><svg class="ico"><use href="#i-menu"/></svg><span>עוד</span><i>עוד</i></a>
   </nav>
@@ -75,8 +84,8 @@
 
 <aside class="drawer" id="drawer" hidden>
   <div class="drawer-scrim" data-close></div>
-  <div class="drawer-panel" role="dialog" aria-modal="true">
-    <button class="btn icon ghost drawer-x" data-close aria-label="סגור"><svg class="ico"><use href="#i-x"/></svg></button>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="פרטי הדירה">
+    <button class="btn icon ghost drawer-x" data-close aria-label="סגור את פרטי הדירה"><svg class="ico"><use href="#i-x"/></svg></button>
     <div id="drawerBody"></div>
   </div>
 </aside>
