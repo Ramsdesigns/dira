@@ -255,6 +255,7 @@ body.auth-mode .app{grid-template-columns:1fr;grid-template-rows:1fr}
 .sheet-actions{display:flex;gap:8px}
 .sheet-actions .btn{flex:1;justify-content:center;height:42px}
 .toast{display:flex;align-items:center;gap:14px}
+.exit-panel{max-width:420px}
 .toast-act{background:none;border:0;color:var(--accent);font:inherit;font-weight:700;cursor:pointer;padding:0}
 
 /* =====================================================================

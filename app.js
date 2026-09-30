@@ -461,19 +461,78 @@ async function openDrawer(id) {
   const wasHidden = $("#drawer").hidden;
   $("#drawer").hidden = false;
   // פוקוס לחלון שנפתח, וחזרה למקום הקודם כשהוא נסגר — כדי שאפשר יהיה לעבוד במקלדת ובקורא מסך
-  if (wasHidden) { drawerReturn = document.activeElement; $("#drawer .drawer-x").focus(); }
+  if (wasHidden) { drawerReturn = document.activeElement; $("#drawer .drawer-x").focus(); overlayOpened(closeDrawerNow); }
   // "הצג את כל המודעה" רק אם הטקסט באמת נחתך
   const at = $("#adText");
   if (at && at.scrollHeight > at.clientHeight + 4) at.nextElementSibling.hidden = false;
   renderCounts();
 }
 
+/* ---------- כפתור "חזור" של הטלפון ----------
+   כל חלון שנפתח (דירה, תמונות, גיליון סיבות) נרשם בהיסטוריה של הדפדפן, כך ש"חזור" סוגר אותו
+   במקום לצאת מהאפליקציה. במסך הבית "חזור" שואל אם לצאת. */
+const overlays = [];      // פונקציות סגירה, העליון אחרון
+let ignorePops = 0;
+
+function overlayOpened(closeNow) {
+  overlays.push(closeNow);
+  history.pushState({ overlay: true }, "");
+}
+
+/** סגירה מתוך הממשק (X / Esc / רקע): סוגר את החלון ואת מה שמעליו, ומחזיר את ההיסטוריה בהתאם. */
+function overlayClose(closeNow) {
+  const i = overlays.lastIndexOf(closeNow);
+  if (i < 0) return closeNow();
+  const fns = overlays.splice(i);
+  fns.reverse().forEach(f => f());
+  ignorePops++;
+  history.go(-fns.length);
+}
+
+window.addEventListener("popstate", e => {
+  if (ignorePops) { ignorePops--; return; }
+  if (overlays.length) { overlays.pop()(); return; }
+  if (e.state?.root && exitGuard) askExit();
+});
+
+const exitGuard = matchMedia("(max-width: 900px)").matches || matchMedia("(display-mode: standalone)").matches;
+function armExitGuard() {
+  if (!exitGuard || history.state?.guard || history.state?.overlay) return;
+  history.replaceState({ root: true }, "");
+  history.pushState({ guard: true }, "");
+}
+
+function askExit() {
+  const box = document.createElement("div");
+  box.className = "sheet";
+  box.innerHTML = `<div class="sheet-scrim" data-stay></div>
+    <div class="sheet-panel exit-panel" role="alertdialog" aria-modal="true" aria-labelledby="exTitle">
+      <h2 id="exTitle">לצאת מצייד הדירות?</h2>
+      <p class="muted">הסורק במחשב ממשיך לעבוד, וההתראות ימשיכו להגיע לטלגרם.</p>
+      <div class="sheet-actions">
+        <button class="btn primary" data-stay>הישאר</button>
+        <button class="btn ghost" data-exit>צא</button>
+      </div>
+    </div>`;
+  document.body.append(box);
+  const stay = () => { box.remove(); history.pushState({ guard: true }, ""); };
+  box.addEventListener("click", e => {
+    if (e.target.closest("[data-exit]")) { box.remove(); history.back(); }
+    else if (e.target.closest("[data-stay]")) stay();
+  });
+  box.querySelector("[data-stay].btn").focus();
+}
+
 let drawerReturn = null;
-function closeDrawer() {
+function closeDrawerNow() {
   if ($("#drawer").hidden) return;
   $("#drawer").hidden = true;
   if (drawerReturn?.isConnected) drawerReturn.focus();
   drawerReturn = null;
+}
+function closeDrawer() {
+  if ($("#drawer").hidden) return;
+  overlayClose(closeDrawerNow);
 }
 
 /** Tab בתוך חלון פתוח (מגירה / תמונות) נשאר בתוכו, ולא בורח לדף שמאחוריו. */
@@ -517,7 +576,9 @@ function openLightbox(images, start) {
   const w = () => track.clientWidth;
   requestAnimationFrame(() => { track.scrollLeft = -start * w(); if (track.scrollLeft === 0 && start) track.scrollLeft = start * w(); });
   track.addEventListener("scroll", () => { lb.querySelector(".lb-count span").textContent = Math.round(Math.abs(track.scrollLeft) / w()) + 1; });
-  const close = () => { lb.remove(); document.removeEventListener("keydown", key); if (back?.isConnected) back.focus(); };
+  const closeNow = () => { lb.remove(); document.removeEventListener("keydown", key); if (back?.isConnected) back.focus(); };
+  const close = () => overlayClose(closeNow);
+  overlayOpened(closeNow);
   const key = e => {
     if (e.key === "Escape") close();
     if (e.key === "Tab") trapTab(e, lb);
@@ -979,7 +1040,9 @@ function openRejectSheet(l, inDrawer) {
       ${(l.members?.length ?? 1) > 1 ? `<p class="dim">חל על כל ${l.members.length} המודעות של הדירה הזו.</p>` : ""}
     </form>`;
   document.body.append(box);
-  const close = () => { box.remove(); document.removeEventListener("keydown", key); };
+  const closeNow = () => { box.remove(); document.removeEventListener("keydown", key); };
+  const close = () => overlayClose(closeNow);
+  overlayOpened(closeNow);
   const key = e => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", key);
   box.addEventListener("click", e => { if (e.target.closest("[data-sclose]")) close(); });
@@ -988,8 +1051,8 @@ function openRejectSheet(l, inDrawer) {
     const f = new FormData(e.target);
     const before = { status: l.user?.status ?? "new", fav: !!l.user?.fav };
     await setUser(l, { status: "rejected", rejectReason: f.get("r") || null, rejectNote: (f.get("note") || "").trim() || null, rejectedAt: Date.now(), seen: true, fav: false });
-    close();
-    if (inDrawer) closeDrawer();
+    // מתוך חלון הדירה: סוגרים את שניהם בצעד היסטוריה אחד (הדירה + הגיליון שמעליה)
+    if (inDrawer && !$("#drawer").hidden) closeDrawer(); else close();
     renderCounts();
     const y = main.scrollTop; route(); main.scrollTop = y;
     toast("סומנה כלא רלוונטית", false, { label: "בטל", run: async () => {
@@ -1399,6 +1462,7 @@ async function boot() {
   refreshData();
   liveSub ??= db.live(() => refreshData());
   pollTimer ??= setInterval(pollStatus, 15000);
+  armExitGuard();
 }
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S) { pollStatus(); refreshData(); } });
