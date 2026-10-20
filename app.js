@@ -308,6 +308,8 @@ function aiConfigured() {
 }
 
 function isGone(l) {
+  // בפייסבוק פוסט פשוט יורד במורד הקבוצה — זה לא אומר שהוסר
+  if (String(l.source).startsWith("fb")) return false;
   const st = srcState[l.sourceId];
   return st?.lastOk && l.lastSeen < st.lastOk - 26 * 3600e3;
 }
