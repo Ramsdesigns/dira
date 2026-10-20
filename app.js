@@ -326,7 +326,7 @@ function card(l, s) {
   const status = l.user?.status ?? "new";
   return `<article class="card ${l.user?.seen ? "" : "unseen"} ${s.mustFail || status === "rejected" ? "muted-card" : ""}" data-id="${esc(l.id)}">
     <div class="pic">
-      ${img ? `<img src="${esc(img)}" loading="lazy" alt="${esc(`תמונה של הדירה: ${facts(l) || place(l)}`)}" referrerpolicy="no-referrer">` :`<div class="noimg">${esc((l.text ?? "").slice(0, 140)) || "אין תמונה"}</div>`}
+      ${img ? `<img src="${esc(imgSrc(img))}"${photoAttr(img)} loading="lazy" alt="${esc(`תמונה של הדירה: ${facts(l) || place(l)}`)}" referrerpolicy="no-referrer">` :`<div class="noimg">${esc((l.text ?? "").slice(0, 140)) || "אין תמונה"}</div>`}
       <div class="badges">
         ${!l.user?.seen ? `<span class="badge new">חדש</span>` : ""}
         ${drop ? `<span class="badge drop">${icon("down", "sm")}ירד מחיר</span>` : ""}
@@ -433,7 +433,7 @@ async function openDrawer(id) {
   ].filter(([, v]) => v !== null && v !== undefined && v !== "");
 
   $("#drawerBody").innerHTML = `
-    <div class="gallery">${imgs.length ? imgs.map((src, i) => `<img src="${esc(src)}" alt="תמונה ${i + 1} מתוך ${imgs.length} של הדירה (לחיצה מגדילה)" tabindex="0" role="button" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">${l.images?.length ? "התמונות של המודעה כבר לא זמינות בפייסבוק — פתח את המודעה המקורית" : "אין תמונות"}</div>`}</div>
+    <div class="gallery">${imgs.length ? imgs.map((src, i) => `<img src="${esc(imgSrc(src))}"${photoAttr(src)} alt="תמונה ${i + 1} מתוך ${imgs.length} של הדירה (לחיצה מגדילה)" tabindex="0" role="button" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">${l.images?.length ? "התמונות של המודעה כבר לא זמינות בפייסבוק — פתח את המודעה המקורית" : "אין תמונות"}</div>`}</div>
     ${imgs.length > 1 ? `<div class="gallery-count">${imgs.length} תמונות · לחץ להגדלה</div>` : ""}
     <div class="dsec">
       <div class="dhead">${ring(s, true)}<div class="grow"><h2>${esc(facts(l) || l.title || "מודעה")}</h2><p class="muted">${esc(place(l))}${l.address ? " · " + esc(l.address) : ""}</p></div></div>
@@ -1141,6 +1141,37 @@ main.addEventListener("input", e => {
   if (t.dataset.p2) settingField(t);
   if (t.dataset.sf === "name") sourceField(t);
 });
+
+/* ---------- עותקי תמונות שהסורק שמר ("photo:img:...") ----------
+   נטענים מהענן רק כשהכרטיס מתקרב למסך, בקבוצות, ונשמרים בזיכרון לשאר הביקור. */
+const BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+const photoCache = new Map();
+const isPhotoRef = u => String(u).startsWith("photo:");
+const imgSrc = u => isPhotoRef(u) ? (photoCache.get(u.slice(6)) ?? BLANK) : u;
+const photoAttr = u => isPhotoRef(u) && !photoCache.has(u.slice(6)) ? ` data-photo="${esc(u.slice(6))}"` : "";
+const photoQueue = new Set();
+let photoTimer = null;
+const photoIO = new IntersectionObserver(entries => {
+  for (const e of entries) if (e.isIntersecting) { photoIO.unobserve(e.target); photoQueue.add(e.target); }
+  clearTimeout(photoTimer);
+  photoTimer = setTimeout(loadPhotos, 60);
+}, { rootMargin: "800px" });
+async function loadPhotos() {
+  const els = [...photoQueue];
+  photoQueue.clear();
+  const ids = [...new Set(els.map(el => el.dataset.photo).filter(id => !photoCache.has(id)))];
+  if (ids.length) {
+    try { for (const [k, v] of await db.photos(ids)) photoCache.set(k, v); } catch { /* ננסה בפעם הבאה שהכרטיס יוצג */ }
+  }
+  for (const el of els) {
+    const v = photoCache.get(el.dataset.photo);
+    if (v) { el.src = v; el.removeAttribute("data-photo"); }
+    else el.dispatchEvent(new Event("error"));
+  }
+}
+new MutationObserver(() => {
+  for (const el of document.querySelectorAll("img[data-photo]:not([data-watch])")) { el.dataset.watch = "1"; photoIO.observe(el); }
+}).observe(document.body, { childList: true, subtree: true });
 
 // תמונה שלא נטענת (כתובת שפגה / נחסמה) — טקסט המודעה במקום אייקון של תמונה שבורה
 document.addEventListener("error", e => {
