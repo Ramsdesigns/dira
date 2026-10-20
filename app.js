@@ -654,7 +654,7 @@ function viewProfile() {
       <span class="saved">נשמר ✓</span></div>
     <div class="ptabs">
       ${S.profiles.map(p => `<button class="btn sm ${p.id === P.id ? "primary" : ""}" data-pact="select" data-id="${p.id}">${esc(p.name)}</button>`).join("")}
-      <select class="tpl-pick" data-pact-select="new" title="פרופיל חדש מתבנית"><option value="">+ פרופיל חדש…</option>${Object.entries(PROFILE_TEMPLATES).map(([k, t]) => `<option value="${k}">${esc(t.label)}</option>`).join("")}</select>
+      <select class="tpl-pick" data-pact-select="new" title="פרופיל חדש מתבנית"><option value="">+ פרופיל חדש…</option>${Object.entries(PROFILE_TEMPLATES).filter(([, t]) => !t.hidden).map(([k, t]) => `<option value="${k}">${esc(t.label)}</option>`).join("")}</select>
       <button class="btn sm ghost" data-pact="dup">שכפל</button>
       <button class="btn sm ghost" data-pact="import">ייבוא</button>
       <button class="btn sm ghost" data-pact="export">ייצוא</button>
@@ -1521,7 +1521,7 @@ function firstRun() {
   main.innerHTML = `<div class="auth wide">
     <h1>מאיפה מתחילים?</h1>
     <p class="muted">בחר תבנית, ואחר כך אפשר לשנות בה הכל: אזורים, תקציב, מה חובה ומה רק נחמד, ושאלות חופשיות ל-AI.</p>
-    <div class="tpl">${Object.entries(PROFILE_TEMPLATES).map(([k, t]) => `<button class="btn" data-tpl="${k}">${esc(t.label)}</button>`).join("")}</div>
+    <div class="tpl">${Object.entries(PROFILE_TEMPLATES).filter(([, t]) => !t.hidden).map(([k, t]) => `<button class="btn" data-tpl="${k}">${esc(t.label)}</button>`).join("")}</div>
   </div>`;
   main.querySelectorAll("[data-tpl]").forEach(b => b.onclick = async () => {
     if (b.dataset.tpl === "rent") return rentWizard(async ({ profile: p, sources }) => {
