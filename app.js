@@ -5,10 +5,10 @@ import * as db from "./lib/store.js";
 import { scoreListing, monthlyPayment, criterionLabel } from "./lib/score.js";
 import {
   IMPORTANCE, FEATURES, STATUSES, REJECT_REASONS, SOURCE_TYPES, CRITERION_KINDS, PROFILE_TEMPLATES, AI_MODELS as MODELS,
-  newCriterion, uid, detectSourceType, dealTypeFromUrl, DEFAULT_MESSAGE, defaultSettings, defaultSources,
+  newCriterion, uid, detectSourceType, dealTypeFromUrl, DEFAULT_MESSAGE, defaultSettings, defaultSources, fbSearchUrl,
 } from "./lib/model.js";
 import { waNumber, norm } from "./lib/text.js";
-import { clusterListings, mergeCluster } from "./lib/dedup.js";
+import { clusterListings, mergeCluster, liveImages } from "./lib/dedup.js";
 
 /* ======================= מצב ======================= */
 
@@ -37,6 +37,8 @@ const profile = () => S.profiles.find(p => p.id === UI.profileId) ?? S.profiles[
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtPrice = p => (p ? "₪" + Math.round(p).toLocaleString("he-IL") : "מחיר לא צוין");
+const priceOf = l => fmtPrice(l.price) + (l.price && l.dealType === "rent" ? " לחודש" : "");
+const entryTxt = d => !d ? null : d === "now" ? "מיידית" : String(d).slice(0, 10).split("-").reverse().join(".");
 const fmtK = p => (p >= 1e6 ? (p / 1e6).toFixed(p % 1e6 ? 2 : 0).replace(/\.?0+$/, "") + "M" : Math.round(p / 1000) + "K");
 const icon = (id, cls = "") => `<svg class="ico ${cls}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
 // כתובות שמגיעות מהנתונים (מודעות, מקורות) נכנסות ל-href רק אם הן https — כתובת "javascript:" לא תרוץ בלחיצה
@@ -311,7 +313,7 @@ function isGone(l) {
 }
 
 function card(l, s) {
-  const img = l.images?.[0];
+  const img = liveImages(l)[0];
   const pp = ppsqmInfo(l);
   const drop = (l.priceHistory?.length ?? 0) > 1 && l.priceHistory.at(-1).price < l.priceHistory[0].price;
   const chips = s.breakdown
@@ -335,7 +337,7 @@ function card(l, s) {
       ${ring(s)}
     </div>
     <div class="body">
-      <div class="price-row"><span class="price num">${fmtPrice(l.price)}</span>
+      <div class="price-row"><span class="price num">${priceOf(l)}</span>
         ${pp ? `<span class="ppsqm">₪${Math.round(pp.v).toLocaleString("he-IL")} למ״ר${pp.diff !== null ? ` · <span class="${pp.diff <= -5 ? "cheap" : pp.diff >= 5 ? "pricey" : ""}">${pp.diff > 0 ? "+" : ""}${pp.diff}% מהחציון ${pp.scope}</span>` : ""}</span>` : ""}</div>
       <div class="facts">${esc(facts(l)) || "<span class='dim'>פרטים חסרים</span>"}</div>
       <div class="place">${esc(place(l))}${l.address && !place(l).includes(l.address) ? " · " + esc(l.address) : ""}</div>
@@ -419,19 +421,20 @@ async function openDrawer(id) {
   const pp = ppsqmInfo(l);
   const pay = monthlyPayment(l.price, S.finance);
   const f = l.features ?? {};
+  const imgs = liveImages(l);
   const featTxt = Object.entries(FEATURES).map(([k, v]) => f[k] === true ? `✓ ${v}` : f[k] === false ? `✗ ${v}` : null).filter(Boolean).join(" · ");
   const kv = [
-    ["מחיר", fmtPrice(l.price)], ["חדרים", l.rooms], ["שטח", l.sqm && `${l.sqm} מ״ר`], ["גינה", l.gardenSqm && `${l.gardenSqm} מ״ר`],
+    ["מחיר", priceOf(l)], ["חדרים", l.rooms], ["שטח", l.sqm && `${l.sqm} מ״ר`], ["גינה", l.gardenSqm && `${l.gardenSqm} מ״ר`],
     ["קומה", floorTxt(l)], ["סוג נכס", l.propertyType], ["מצב", l.condition], ["תיווך", l.broker === true ? "כן" : l.broker === false ? "ללא תיווך" : null],
     ["מחיר למ״ר", pp && `₪${Math.round(pp.v).toLocaleString("he-IL")}${pp.diff !== null ? ` (${pp.diff > 0 ? "+" : ""}${pp.diff}% מהחציון ${pp.scope}, ${pp.n} דירות)` : ""}`],
     ["החזר חודשי משוער", pay && S.finance.equity ? `₪${pay.toLocaleString("he-IL")} (${S.finance.years} שנה, ${S.finance.rate}%)` : null],
-    ["ועד בית", l.houseCommittee && `₪${l.houseCommittee}`], ["כניסה", l.entryDate], ["איש קשר", l.contactName], ["טלפון", l.phone],
+    ["ועד בית", l.houseCommittee && `₪${l.houseCommittee}`], ["כניסה", entryTxt(l.entryDate)], ["איש קשר", l.contactName], ["טלפון", l.phone],
     ["נראתה לראשונה", ago(l.firstSeen)], ["נראתה לאחרונה", ago(l.lastSeen)],
   ].filter(([, v]) => v !== null && v !== undefined && v !== "");
 
   $("#drawerBody").innerHTML = `
-    <div class="gallery">${l.images?.length ? l.images.map((src, i) => `<img src="${esc(src)}" alt="תמונה ${i + 1} מתוך ${l.images.length} של הדירה (לחיצה מגדילה)" tabindex="0" role="button" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">אין תמונות</div>`}</div>
-    ${l.images?.length > 1 ? `<div class="gallery-count">${l.images.length} תמונות · לחץ להגדלה</div>` : ""}
+    <div class="gallery">${imgs.length ? imgs.map((src, i) => `<img src="${esc(src)}" alt="תמונה ${i + 1} מתוך ${imgs.length} של הדירה (לחיצה מגדילה)" tabindex="0" role="button" loading="lazy" referrerpolicy="no-referrer" data-zoom="${i}">`).join("") : `<div class="noimg">${l.images?.length ? "התמונות של המודעה כבר לא זמינות בפייסבוק — פתח את המודעה המקורית" : "אין תמונות"}</div>`}</div>
+    ${imgs.length > 1 ? `<div class="gallery-count">${imgs.length} תמונות · לחץ להגדלה</div>` : ""}
     <div class="dsec">
       <div class="dhead">${ring(s, true)}<div class="grow"><h2>${esc(facts(l) || l.title || "מודעה")}</h2><p class="muted">${esc(place(l))}${l.address ? " · " + esc(l.address) : ""}</p></div></div>
       <br><div class="actions" data-id="${esc(l.id)}">
@@ -623,6 +626,9 @@ function critBody(c) {
       <label class="check"><input type="checkbox" data-c="${c.id}" data-f="notTop" data-t="bool" ${c.notTop ? "checked" : ""}>לא אחרונה</label></div>`;
     case "feature": return `<div class="form-grid"><label class="field">מאפיין<select data-c="${c.id}" data-f="feature">${Object.entries(FEATURES).map(([k, v]) => `<option value="${k}" ${c.feature === k ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>`;
     case "broker": return "";
+    case "entryDate": return `<div class="form-grid"><label class="field">כניסה החל מ-<input type="date" data-c="${c.id}" data-f="from" data-t="date" value="${esc(c.from ?? "")}"></label>
+      <label class="field">כניסה לכל המאוחר<input type="date" data-c="${c.id}" data-f="by" data-t="date" value="${esc(c.by ?? "")}"></label></div>
+      <p class="sub">ריק = לא משנה. כניסה מיידית נחשבת "עכשיו".</p>`;
     case "location": return `${tiersHtml(c, "areas", { city: true })}
       <label class="field">להחריג (מילים שפוסלות, מופרדות בפסיק)<input type="text" data-c="${c.id}" data-f="exclude" data-t="list" value="${esc(listVal(c.exclude))}"></label>`;
     case "propertyType": return tiersHtml(c, "types", { city: false });
@@ -661,6 +667,7 @@ function viewProfile() {
         <label class="field">התראה מעל <span class="num" id="thrVal">${P.notifyThreshold}%</span><input type="range" min="30" max="100" step="5" data-p="notifyThreshold" value="${P.notifyThreshold}"></label>
         <label class="check"><input type="checkbox" data-p="active" ${P.active ? "checked" : ""}>פעיל (נסרק ומתריע)</label>
       </div>
+      ${P.dealType === "rent" && !S.sources.some(s => s.enabled && s.dealType === "rent" && (s.type === "yad2" || s.type === "madlan")) ? `<br><p class="warn-line"><b>אין עדיין מקורות שכירות.</b> קבוצות הפייסבוק שכבר נסרקות כוללות גם פוסטים של השכרה, והם ייקלטו מעכשיו. ליד 2 ולמדלן: <a href="#sources">מקורות</a> ← "יד 2: שכירות" / "מדלן: שכירות", בוחרים עיר באתר ומוסיפים את העמוד דרך התוסף.</p>` : ""}
       <br><div class="dist">כרגע: <span><b class="num">${nAbove}</b> דירות מעל הסף</span><span><b class="num">${nFail}</b> נכשלות בחובה</span><span><b class="num">${sc.length}</b> רלוונטיות לסוג העסקה</span></div>
     </section>
     <div class="crits">${P.criteria.map(c => `
@@ -686,6 +693,7 @@ function coerce(el) {
   const t = el.dataset.t;
   if (t === "bool") return el.checked;
   if (t === "num") return el.value === "" ? null : Number(el.value);
+  if (t === "date") return el.value || null;
   if (t === "list") return el.value.split(/[,،\n]/).map(s => s.trim()).filter(Boolean);
   return el.value;
 }
@@ -707,7 +715,14 @@ function viewSources() {
         <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("נדל\"ן חיפה והקריות")}">חפש קבוצות: נדל״ן חיפה והקריות</a>
         <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("יחידת דיור למכירה")}">חפש קבוצות: יחידת דיור</a>
         <a class="btn sm" ${EXT} href="https://www.facebook.com/marketplace/category/propertyforsale">מרקטפלייס: נכסים למכירה</a>
+        <a class="btn sm" ${EXT} href="https://www.yad2.co.il/realestate/rent">יד 2: שכירות</a>
+        <a class="btn sm" ${EXT} href="https://www.madlan.co.il/for-rent">מדלן: שכירות</a>
+        <a class="btn sm" ${EXT} href="https://www.facebook.com/groups/search/groups/?q=${q("דירות להשכרה חיפה")}">חפש קבוצות: דירות להשכרה</a>
       </div>
+    </section>
+    <section class="panel"><h2>חיפוש פוסטים בכל פייסבוק</h2>
+      <p class="sub">תופס דירות שמתפרסמות בקבוצות שלא ברשימה: הסורק פותח את החיפוש של פייסבוק (פוסטים אחרונים) וקורא את התוצאות, מכל הקבוצות שאתה חבר בהן ומקבוצות ציבוריות. מילים קצרות וברורות עובדות הכי טוב.</p>
+      <div class="row"><input type="text" id="newSearch" class="grow" placeholder="למשל: דירה למכירה נשר"><select id="newSearchDeal" aria-label="סוג עסקה"><option value="sale">קנייה</option><option value="rent">שכירות</option></select><button class="btn primary" data-sact="addSearch">הוסף חיפוש</button></div>
     </section>
     <div class="src-list">${S.sources.map(s => {
       const st = srcState[s.id] ?? {};
@@ -1127,6 +1142,17 @@ main.addEventListener("input", e => {
   if (t.dataset.sf === "name") sourceField(t);
 });
 
+// תמונה שלא נטענת (כתובת שפגה / נחסמה) — טקסט המודעה במקום אייקון של תמונה שבורה
+document.addEventListener("error", e => {
+  const img = e.target;
+  if (img?.tagName !== "IMG" || !img.closest(".pic, .gallery")) return;
+  const box = document.createElement("div");
+  box.className = "noimg";
+  const l = img.closest(".pic") ? viewOf(img.closest("[data-id]")?.dataset.id) : null;
+  box.textContent = l ? ((l.text ?? "").slice(0, 140) || "אין תמונה") : "התמונה לא זמינה";
+  img.replaceWith(box);
+}, true);
+
 function critField(t) {
   const c = critById(t.dataset.c);
   if (!c) return;
@@ -1225,7 +1251,7 @@ async function sourceAction(act, t) {
   if (act === "add") {
     const url = $("#newSrc").value.trim();
     const type = detectSourceType(url);
-    if (!type) return toast("הכתובת לא נתמכת. נתמך: חיפוש ביד 2 / מדלן, קבוצת פייסבוק, מרקטפלייס.", true);
+    if (!type) return toast("הכתובת לא נתמכת. נתמך: חיפוש ביד 2 / מדלן, קבוצת פייסבוק, חיפוש פוסטים בפייסבוק, מרקטפלייס.", true);
     const clean = url.split("#")[0];
     if (S.sources.some(x => x.url === clean)) return toast("המקור כבר קיים");
     let tail = "";
@@ -1234,6 +1260,17 @@ async function sourceAction(act, t) {
       name: `${SOURCE_TYPES[type].label} — ${tail}` });
     await persist(true);
     toast("נוסף. הוא ייסרק בסבב הקרוב של הסורק");
+    renderCounts();
+    return viewSources();
+  }
+  if (act === "addSearch") {
+    const query = $("#newSearch").value.trim();
+    if (query.length < 3) return toast("כתוב מה לחפש, למשל: דירה למכירה נשר", true);
+    const url = fbSearchUrl(query);
+    if (S.sources.some(x => x.type === "fb_search" && x.name.endsWith(`"${query}"`))) return toast("החיפוש הזה כבר קיים");
+    S.sources.push({ id: uid("s"), type: "fb_search", enabled: true, url, dealType: $("#newSearchDeal").value, name: `חיפוש בפייסבוק — "${query}"` });
+    await persist(true);
+    toast("נוסף. הוא ייסרק בסבב הפייסבוק הקרוב");
     renderCounts();
     return viewSources();
   }
