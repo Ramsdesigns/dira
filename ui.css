@@ -75,13 +75,14 @@ a:hover{color:var(--accent-hi)}
 .btn.icon.sm{width:28px}
 
 /* ---------- שדות ---------- */
-input[type=text],input[type=number],input[type=search],input[type=password],input[type=time],input[type=url],select,textarea{
+input[type=text],input[type=number],input[type=search],input[type=password],input[type=time],input[type=url],input[type=date],select,textarea{
   font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);
   height:34px;padding:0 10px;min-width:0;transition:border-color var(--t)}
 textarea{height:auto;padding:8px 10px;resize:vertical;line-height:1.5}
 input:hover,select:hover,textarea:hover{border-color:var(--line-hi)}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 input[type=number]{direction:ltr;text-align:right}
+input[type=date]{direction:ltr;text-align:right}
 input[type=range]{accent-color:var(--accent)}
 input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
 label.field{display:flex;flex-direction:column;gap:5px;font-size:var(--fs-sm);color:var(--text-2)}

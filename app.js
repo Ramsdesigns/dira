@@ -240,7 +240,7 @@ function onboardingHtml() {
     [S.notify.telegram.enabled || S.notify.email.enabled, "חבר טלגרם או מייל כדי לקבל התראות לטלפון", "#notify", "להתראות"],
     [!!lastRunAt, "הרץ סריקה ראשונה", null, "סרוק עכשיו"],
   ];
-  if (steps.every(s => s[0]) || S.onboard?.dismissed) return "";
+  if (steps.every(s => s[0]) || S.onboard?.dismissed || S.onboard?.managed) return "";
   return `<section class="onboard">
     <div class="row"><h2 class="grow">מתחילים — 6 צעדים</h2><button class="btn ghost sm" data-act="dismissOnboard">הסתר</button></div>
     <ol>${steps.map(([ok, txt, href, cta]) => `<li class="${ok ? "done" : ""}"><span>${txt}</span>${ok ? "" : href ? `<a class="btn sm" href="${href}">${cta}</a>` : `<button class="btn sm primary" data-act="scanNow">${cta}</button>`}</li>`).join("")}</ol>
@@ -337,7 +337,7 @@ function card(l, s) {
       ${ring(s)}
     </div>
     <div class="body">
-      <div class="price-row"><span class="price num">${priceOf(l)}</span>
+      <div class="price-row"><span class="price num">${fmtPrice(l.price)}</span>${l.price && l.dealType === "rent" ? `<span class="per-month">לחודש</span>` : ""}
         ${pp ? `<span class="ppsqm">₪${Math.round(pp.v).toLocaleString("he-IL")} למ״ר${pp.diff !== null ? ` · <span class="${pp.diff <= -5 ? "cheap" : pp.diff >= 5 ? "pricey" : ""}">${pp.diff > 0 ? "+" : ""}${pp.diff}% מהחציון ${pp.scope}</span>` : ""}</span>` : ""}</div>
       <div class="facts">${esc(facts(l)) || "<span class='dim'>פרטים חסרים</span>"}</div>
       <div class="place">${esc(place(l))}${l.address && !place(l).includes(l.address) ? " · " + esc(l.address) : ""}</div>
@@ -1490,7 +1490,7 @@ function rentWizard(onDone, onCancel) {
         <label class="field">מתי צריך להיכנס<select name="entry"><option value="flex">גמיש</option><option value="now">מיידי (בשבועיים הקרובים)</option><option value="date">עד תאריך…</option></select></label>
         <label class="field" id="entryDateField" hidden>כניסה לכל המאוחר<input name="entryBy" type="date"></label>
       </div>
-      <h3>מה חשוב בדירה</h3>
+      <h3 style="margin-top:18px">מה חשוב בדירה</h3>
       <div class="form-grid">${WANT.map(([k, t]) => `<label class="field">${t}${tri(k, k === "parking" || k === "aircon" ? "prefer" : "any")}</label>`).join("")}</div>
       <div class="form-grid">
         <label class="check"><input type="checkbox" name="pets">יש לנו חיית מחמד</label>
@@ -1528,6 +1528,7 @@ function firstRun() {
       const s = defaultSettings();
       s.profiles = [p];
       s.sources = sources;
+      s.onboard = { profileReviewed: true, managed: true };
       await db.saveSettings(s);
       location.hash = "#listings";
       boot();

@@ -74,6 +74,7 @@
 .card .body{padding:12px 14px 10px;display:flex;flex-direction:column;gap:6px;flex:1}
 .price-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .price{font-size:var(--fs-lg);font-weight:720}
+.per-month{font-size:var(--fs-sm);color:var(--text-2);font-weight:500}
 .ppsqm{font-size:var(--fs-xs);color:var(--text-3)}
 .ppsqm .cheap{color:var(--good)} .ppsqm .pricey{color:var(--bad)}
 .facts{color:var(--text);font-size:var(--fs-sm)}
