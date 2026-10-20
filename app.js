@@ -5,7 +5,7 @@ import * as db from "./lib/store.js";
 import { scoreListing, monthlyPayment, criterionLabel } from "./lib/score.js";
 import {
   IMPORTANCE, FEATURES, STATUSES, REJECT_REASONS, SOURCE_TYPES, CRITERION_KINDS, PROFILE_TEMPLATES, AI_MODELS as MODELS,
-  newCriterion, uid, detectSourceType, dealTypeFromUrl, DEFAULT_MESSAGE, defaultSettings, defaultSources, fbSearchUrl,
+  newCriterion, uid, detectSourceType, dealTypeFromUrl, DEFAULT_MESSAGE, defaultSettings, defaultSources, fbSearchUrl, rentFromAnswers, YAD2_CITIES,
 } from "./lib/model.js";
 import { waNumber, norm } from "./lib/text.js";
 import { clusterListings, mergeCluster, liveImages } from "./lib/dedup.js";
@@ -1214,6 +1214,19 @@ async function critAction(act, t) {
 
 async function profileAction(act, t) {
   if (act === "select") UI.profileId = t.dataset.id;
+  if (act === "new" && t.value === "rent") {
+    return rentWizard(async ({ profile: p, sources }) => {
+      S.profiles.push(p); UI.profileId = p.id;
+      // מקורות שכבר קיימים (אותה כתובת) לא נוספים שוב
+      for (const s of sources) if (!S.sources.some(x => x.url === s.url)) S.sources.push(s);
+      saveUi();
+      await persist(true);
+      renderProfileSel(); renderCounts();
+      toast(`נוצר "${p.name}" עם ${sources.length} מקורות. הסורק במחשב יתחיל לחפש בסבב הקרוב`);
+      location.hash = "#profile";
+      viewProfile();
+    }, () => viewProfile());
+  }
   if (act === "new") {
     const p = PROFILE_TEMPLATES[t.value]?.make();
     if (!p) return;
@@ -1458,6 +1471,52 @@ function authScreen(msg = "") {
   };
 }
 
+/* ======================= שאלון שכירות ======================= */
+/* מי שמחפש שכירות עונה על כמה שאלות, ומהן נבנים הפרופיל (קריטריונים) והמקורות (יד 2, מדלן, חיפוש בפייסבוק).
+   אחר כך הכל ניתן לעריכה במסך הפרופיל. */
+const WANT = [["parking", "חניה"], ["elevator", "מעלית"], ["furnished", "מרוהטת"], ["balcony", "מרפסת"], ["mamad", "ממ\"ד"], ["aircon", "מזגנים"]];
+
+function rentWizard(onDone, onCancel) {
+  const tri = (k, def) => `<select name="w_${k}" aria-label="${esc(WANT.find(w => w[0] === k)[1])}">
+    ${[["any", "לא משנה"], ["prefer", "עדיף"], ["must", "חובה"]].map(([v, t]) => `<option value="${v}" ${v === def ? "selected" : ""}>${t}</option>`).join("")}</select>`;
+  main.innerHTML = `<div class="view-head"><div class="grow"><h1>חיפוש דירה לשכירות</h1>
+      <p>כמה שאלות, ומהן נבנה החיפוש: מה נחשב מתאים, ואיפה מחפשים (יד 2, מדלן ופייסבוק). אפשר לשנות הכל אחר כך במסך הפרופיל.</p></div></div>
+    <form id="rentForm" class="panel">
+      <div class="form-grid">
+        <label class="field">עיר<input type="text" name="city" list="rentCities" required placeholder="למשל: חיפה"></label>
+        <label class="field">שכונות מועדפות (לא חובה, מופרדות בפסיק)<input type="text" name="nbs" placeholder="למשל: כרמל, אחוזה"></label>
+        <label class="field">תקציב חודשי מקסימלי (₪)<input name="maxPrice" type="number" min="500" step="100" required placeholder="למשל: 5500"></label>
+        <label class="field">מינימום חדרים<input name="minRooms" type="number" min="1" max="10" step="0.5" value="3"></label>
+        <label class="field">מתי צריך להיכנס<select name="entry"><option value="flex">גמיש</option><option value="now">מיידי (בשבועיים הקרובים)</option><option value="date">עד תאריך…</option></select></label>
+        <label class="field" id="entryDateField" hidden>כניסה לכל המאוחר<input name="entryBy" type="date"></label>
+      </div>
+      <h3>מה חשוב בדירה</h3>
+      <div class="form-grid">${WANT.map(([k, t]) => `<label class="field">${t}${tri(k, k === "parking" || k === "aircon" ? "prefer" : "any")}</label>`).join("")}</div>
+      <div class="form-grid">
+        <label class="check"><input type="checkbox" name="pets">יש לנו חיית מחמד</label>
+        <label class="check"><input type="checkbox" name="noBroker">רק בלי תיווך</label>
+        <label class="check"><input type="checkbox" name="roommates">מחפשים דירה לשותפים</label>
+      </div>
+      <datalist id="rentCities">${Object.keys(YAD2_CITIES).map(c => `<option value="${esc(c)}">`).join("")}</datalist>
+      <br><div class="row"><button class="btn primary" type="submit">צור את החיפוש</button>${onCancel ? `<button class="btn ghost" type="button" id="rentCancel">ביטול</button>` : ""}</div>
+    </form>`;
+  const f = $("#rentForm");
+  f.entry.onchange = () => { $("#entryDateField").hidden = f.entry.value !== "date"; };
+  if (onCancel) $("#rentCancel").onclick = onCancel;
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const r = rentFromAnswers({
+      city: f.city.value, neighborhoods: f.nbs.value.split(/[,،]/), maxPrice: f.maxPrice.value, minRooms: f.minRooms.value,
+      entry: f.entry.value === "date" ? f.entryBy.value || "flex" : f.entry.value,
+      pets: f.pets.checked, noBroker: f.noBroker.checked, roommates: f.roommates.checked,
+      want: Object.fromEntries(WANT.map(([k]) => [k, f["w_" + k].value])),
+    });
+    f.querySelector("[type=submit]").disabled = true;
+    await onDone(r);
+    if (!r.yad2Known) toast(`ביד 2 לא הוספתי את ${f.city.value} אוטומטית — פתח ביד 2 חיפוש שכירות בעיר והוסף אותו דרך אייקון התוסף`);
+  };
+}
+
 function firstRun() {
   main.innerHTML = `<div class="auth wide">
     <h1>מאיפה מתחילים?</h1>
@@ -1465,6 +1524,14 @@ function firstRun() {
     <div class="tpl">${Object.entries(PROFILE_TEMPLATES).map(([k, t]) => `<button class="btn" data-tpl="${k}">${esc(t.label)}</button>`).join("")}</div>
   </div>`;
   main.querySelectorAll("[data-tpl]").forEach(b => b.onclick = async () => {
+    if (b.dataset.tpl === "rent") return rentWizard(async ({ profile: p, sources }) => {
+      const s = defaultSettings();
+      s.profiles = [p];
+      s.sources = sources;
+      await db.saveSettings(s);
+      location.hash = "#listings";
+      boot();
+    }, firstRun);
     const s = defaultSettings();
     s.profiles = [PROFILE_TEMPLATES[b.dataset.tpl].make()];
     s.sources = b.dataset.tpl === "twoGen" ? defaultSources() : [];
