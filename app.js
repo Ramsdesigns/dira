@@ -1487,21 +1487,27 @@ async function pollStatus() {
 
 /* ======================= התחברות והפעלה ======================= */
 
-/* ההרשמה סגורה: הכניסה בהזמנה בלבד. משתמשים חדשים נוצרים על ידי בעל הפרויקט (build/mkuser.mjs),
-   כי הרשמה פתוחה אפשרה לכל אחד לפתוח חשבון — גם עם כתובת של מישהו אחר — ולמלא את המסד. */
+/* כניסה ופתיחת חשבון (רם, 24.10.2026: "תתן אפשרות לפתוח חשבון ואני אאשר פשוט את המשתמש").
+   השרת מאשר את המייל מיד; הסריקה בשביל משתמש חדש מופעלת רק אחרי שבעל הפרויקט מאשר אותו. */
 function authScreen(msg = "") {
   document.body.classList.add("auth-mode");
+  // #signup = פתיחת חשבון (הקישור ששולחים לחבר); בלי = כניסה
+  const signup = location.hash.slice(1).split("/")[0] === "signup";
   main.innerHTML = `<div class="auth">
     <img src="icons/192.png" alt="">
     <h1>צייד הדירות</h1>
     <p class="muted">כל הדירות מיד 2, מדלן ופייסבוק במקום אחד, מדורגות לפי מה שחשוב לך.</p>
+    <div class="auth-tabs" role="tablist">
+      <a href="#login" role="tab" aria-selected="${!signup}" class="${signup ? "" : "on"}">כניסה</a>
+      <a href="#signup" role="tab" aria-selected="${signup}" class="${signup ? "on" : ""}">פתיחת חשבון</a>
+    </div>
     <form id="authForm">
-      <input type="email" name="email" placeholder="אימייל" aria-label="אימייל" autocomplete="username" required>
-      <input type="password" name="password" placeholder="סיסמה" aria-label="סיסמה" autocomplete="current-password" required>
-      <button class="btn primary" type="submit">כניסה</button>
+      <input type="email" name="email" placeholder="אימייל" aria-label="אימייל" autocomplete="${signup ? "email" : "username"}" required>
+      <input type="password" name="password" placeholder="${signup ? "סיסמה (10 תווים לפחות)" : "סיסמה"}" aria-label="סיסמה" autocomplete="${signup ? "new-password" : "current-password"}" ${signup ? 'minlength="10"' : ""} required>
+      <button class="btn primary" type="submit">${signup ? "פתיחת חשבון" : "כניסה"}</button>
       <p class="auth-msg ${msg ? "show" : ""}" role="alert">${esc(msg)}</p>
     </form>
-    <p class="dim">הכניסה בהזמנה בלבד. אין לך משתמש? בקש ממי שהזמין אותך.</p>
+    <p class="dim">${signup ? "אחרי הפתיחה בונים את החיפוש, ומנהל הכלי מפעיל לך את הסריקה." : "פעם ראשונה? לחץ למעלה על \"פתיחת חשבון\"."}</p>
     <p class="dim"><a href="privacy.html" ${EXT}>מדיניות פרטיות: מה נשמר ומי רואה</a></p>
   </div>`;
   $("#authForm").onsubmit = async e => {
@@ -1510,12 +1516,14 @@ function authScreen(msg = "") {
     const btn = e.target.querySelector("button");
     btn.disabled = true;
     try {
-      await db.signIn(f.get("email"), f.get("password"));
+      if (signup) await db.signUp(String(f.get("email")).trim(), f.get("password"));
+      else await db.signIn(f.get("email"), f.get("password"));
       location.hash = "";
       boot();
     } catch (err) {
       btn.disabled = false;
       const m = /invalid login/i.test(err.message) ? "אימייל או סיסמה שגויים"
+        : /already registered|already exists/i.test(err.message) ? "כבר יש חשבון עם המייל הזה. לחץ למעלה על \"כניסה\"."
         : /not confirmed/i.test(err.message) ? "המשתמש עוד לא אושר. פנה למי שהזמין אותך." : err.message;
       $(".auth-msg").textContent = m;
       $(".auth-msg").classList.add("show");
@@ -1625,7 +1633,7 @@ async function boot() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S) { pollStatus(); refreshData(); } });
 window.addEventListener("hashchange", () => {
   const [v] = location.hash.slice(1).split("/");
-  if (document.body.classList.contains("auth-mode")) return;
+  if (document.body.classList.contains("auth-mode")) { if ((v === "signup" || v === "login") && main.querySelector("#authForm")) authScreen(); return; }
   if (S) route();
 });
 
