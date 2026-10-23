@@ -1612,3 +1612,20 @@ window.addEventListener("hashchange", () => {
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 boot();
+
+/* גרסה חדשה פורסמה (deploy.sh מחליף את VERSION ב-sw.js בכל פרסום) — טוענים מחדש, כדי שלשונית שפתוחה ימים
+   לא תמשיך להריץ קוד ישן (כך קרה עם עותקי התמונות: הקוד הישן הציג טקסט במקומן). לא באמצע הקלדה או כשחלונית דירה פתוחה. */
+let appVersion = null;
+async function checkVersion() {
+  try {
+    const t = await (await fetch(`sw.js?v=${Date.now()}`, { cache: "no-store" })).text();
+    const v = t.match(/const VERSION = "([^"]+)"/)?.[1];
+    if (!v) return;
+    const busy = !document.getElementById("drawer")?.hidden || document.activeElement?.matches?.("input, textarea, select");
+    if (appVersion && v !== appVersion && !busy) location.reload();
+    appVersion ??= v;
+  } catch { /* בלי רשת — ננסה בבדיקה הבאה */ }
+}
+checkVersion();
+setInterval(checkVersion, 5 * 60e3);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
