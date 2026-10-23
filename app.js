@@ -1158,12 +1158,24 @@ const photoIO = new IntersectionObserver(entries => {
   clearTimeout(photoTimer);
   photoTimer = setTimeout(loadPhotos, 60);
 }, { rootMargin: "800px" });
+const photoStats = { asked: 0, got: 0, err: null };
+// אבחון חד-פעמי לכל טעינה של האפליקציה: מה מוצג ומה נכשל — נכתב ליומן, כדי לראות מה קורה במכשיר של המשתמש
+setTimeout(async () => {
+  const pics = [...document.querySelectorAll(".card .pic")];
+  const ver = (await (await fetch(`sw.js?v=${Date.now()}`, { cache: "no-store" }).catch(() => null))?.text().catch(() => "") ?? "").match(/VERSION = "([^"]+)"/)?.[1];
+  const withRef = V.filter(l => (l.images ?? []).some(u => String(u).startsWith("photo:"))).length;
+  db.diag(`אבחון אפליקציה: ${/iPhone|iPad/.test(navigator.userAgent) ? "אייפון" : /Android/.test(navigator.userAgent) ? "אנדרואיד" : "מחשב"} · גרסה ${ver ?? "?"} · ` +
+    `כרטיסים ${pics.length}: תמונה ${pics.filter(c => c.querySelector("img:not([data-photo])")).length}, טקסט ${pics.filter(c => c.querySelector(".noimg")).length}, ממתינים ${pics.filter(c => c.querySelector("img[data-photo]")).length} · ` +
+    `דירות עם עותק שמור ${withRef}/${V.length} · ביקשתי ${photoStats.asked} קיבלתי ${photoStats.got}${photoStats.err ? " · שגיאה: " + photoStats.err : ""} · מסנן ${UI.minScore}% ${UI.sort}`);
+}, 25000);
 async function loadPhotos() {
   const els = [...photoQueue];
   photoQueue.clear();
   const ids = [...new Set(els.map(el => el.dataset.photo).filter(id => !photoCache.has(id)))];
   if (ids.length) {
-    try { for (const [k, v] of await db.photos(ids)) photoCache.set(k, v); } catch { /* ננסה בפעם הבאה שהכרטיס יוצג */ }
+    photoStats.asked += ids.length;
+    try { const m = await db.photos(ids); for (const [k, v] of m) photoCache.set(k, v); photoStats.got += m.size; }
+    catch (e) { photoStats.err = String(e?.message ?? e).slice(0, 120); /* ננסה בפעם הבאה שהכרטיס יוצג */ }
   }
   for (const el of els) {
     const v = photoCache.get(el.dataset.photo);
