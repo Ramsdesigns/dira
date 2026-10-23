@@ -619,7 +619,14 @@ function tiersHtml(c, key, cols) {
 
 function critBody(c) {
   switch (c.kind) {
-    case "price": return `<div class="form-grid"><label class="field">מינימום ₪${numIn(c, "min", "ללא")}</label><label class="field">מקסימום ₪${numIn(c, "max", "ללא")}</label><label class="field">סבילות מעל התקרה %${numIn(c, "tolerancePct")}</label></div>`;
+    case "price": {
+      // טעות הקלדה בתקציב (350,000 במקום 3,500,000) פוסלת בשקט כל דירה עם מחיר — מזהירים בבירור
+      const warn = c.min && c.max && c.max < c.min ? "המקסימום נמוך מהמינימום — כל דירה עם מחיר תיפסל. אולי חסר אפס?"
+        : profile()?.dealType === "sale" && c.max && c.max < 300000 ? `תקרה של ₪${Number(c.max).toLocaleString("he-IL")} לקנייה נראית נמוכה מאוד — אולי חסר אפס?`
+        : profile()?.dealType === "rent" && c.max && c.max > 50000 ? "תקרה כזו לשכירות חודשית נראית גבוהה מאוד — אולי אפס מיותר?" : "";
+      return `<div class="form-grid"><label class="field">מינימום ₪${numIn(c, "min", "ללא")}</label><label class="field">מקסימום ₪${numIn(c, "max", "ללא")}</label><label class="field">סבילות מעל התקרה %${numIn(c, "tolerancePct")}</label></div>` +
+        (warn ? `<p class="warn-line"><b>שים לב:</b> ${esc(warn)}</p>` : "");
+    }
     case "rooms": return `<div class="form-grid"><label class="field">מינימום חדרים${numIn(c, "min", "ללא")}</label><label class="field">מקסימום חדרים${numIn(c, "max", "ללא")}</label></div>`;
     case "sqm": return `<div class="form-grid"><label class="field">מינימום מ״ר${numIn(c, "min", "ללא")}</label><label class="field">מקסימום מ״ר${numIn(c, "max", "ללא")}</label></div>`;
     case "ppsqm": return `<div class="form-grid"><label class="field">תקרת ₪ למ״ר${numIn(c, "max")}</label></div>`;
