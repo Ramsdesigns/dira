@@ -9,6 +9,7 @@ import {
 } from "./lib/model.js";
 import { waNumber, norm } from "./lib/text.js";
 import { clusterListings, mergeCluster, liveImages } from "./lib/dedup.js";
+import { CONFIG } from "./lib/config.js";
 
 /* ======================= מצב ======================= */
 
@@ -20,6 +21,17 @@ let SC = {};             // מצב הסורק במחשב (דופק, מצב מק�
 let srcState = {};
 let lastRunAt = null;
 let scanning = false;
+// מי המשתמש מבחינת הסורק (טבלת members): owner = בעל הפרויקט, שהסורק שלו רץ במחשב שלו;
+// approved / pending / blocked = נרשם עם Google, והסורק של בעל הפרויקט סורק בשבילו (אחרי אישור).
+// owner לפי CONFIG.ownerEmail; חבר = approved ברגע שהסורק כותב אצלו דופק, ועד אז pending
+let ROLE = null;
+function computeRole(email) {
+  if (!CONFIG.ownerEmail || !email) return null;
+  if (email.toLowerCase() === CONFIG.ownerEmail) return "owner";
+  return SC.heartbeat ? "approved" : "pending";
+}
+const isMember = () => !!ROLE && ROLE !== "owner";
+const isOwner = () => ROLE === "owner";
 const UI = loadUi();
 const $ = sel => document.querySelector(sel);
 const main = $("#main");
@@ -187,7 +199,7 @@ function renderCounts() {
 
 /* ======================= ניתוב ======================= */
 
-const views = { rejected: viewRejected, more: viewMore, listings: viewListings, favorites: viewFavorites, pairs: viewPairs, profile: viewProfile, sources: viewSources, notify: viewNotify, settings: viewSettings, log: viewLog };
+const views = { members: viewMembers, rejected: viewRejected, more: viewMore, listings: viewListings, favorites: viewFavorites, pairs: viewPairs, profile: viewProfile, sources: viewSources, notify: viewNotify, settings: viewSettings, log: viewLog };
 
 function route() {
   const [view, sub] = (location.hash.slice(1) || "listings").split("/");
@@ -195,6 +207,61 @@ function route() {
   document.querySelectorAll(".rail a").forEach(a => a.classList.toggle("on", a.dataset.view === v));
   main.scrollTop = 0;
   views[v](sub);
+  roleNote();
+}
+
+/** משתמש שעוד לא אושר / נחסם — שורה בראש כל מסך, כדי שלא יחכה לדירות שלא יגיעו. */
+function roleNote() {
+  const txt = ROLE === "pending"
+    ? "החשבון מחכה לאישור של מנהל הכלי. בינתיים אפשר לבנות את החיפוש ולהתקין את האפליקציה. אחרי האישור הסריקה מתחילה לבד (ייתכן שתראה \"הסורק כבוי\" עד אז)."
+    : ROLE === "blocked" ? "הסריקה בשבילך הופסקה על ידי מנהל הכלי. הדירות שכבר נמצאו נשארות כאן." : "";
+  if (!txt || main.querySelector(".role-note")) return;
+  const needKey = ROLE === "pending" && !joinState();
+  main.insertAdjacentHTML("afterbegin", needKey
+    ? `<form class="warn-line role-note" id="joinForm" role="status"><span>כדי שהסורק יוכל לחפש בשבילך, הקלד שוב את הסיסמה של צייד הדירות (פעם אחת):</span>
+        <span class="row"><input type="password" name="pw" class="grow" autocomplete="current-password" required aria-label="סיסמה"><button class="btn sm primary" type="submit">חבר לסורק</button></span></form>`
+    : `<p class="warn-line role-note" role="status">${txt}</p>`);
+  $("#joinForm")?.addEventListener("submit", async e => {
+    e.preventDefault();
+    const btn = e.target.querySelector("button");
+    btn.disabled = true;
+    try { await handoff($("#who").textContent, e.target.pw.value); toast("נשלח. אחרי שמנהל הכלי יאשר, הסריקה תתחיל."); route(); }
+    catch (err) { btn.disabled = false; toast(/invalid login/i.test(err.message) ? "הסיסמה לא נכונה" : err.message, true); }
+  });
+}
+
+/* ---------- הצטרפות לסורק ----------
+   אחרי פתיחת חשבון / כניסה עם סיסמה: מכינים לסורק מפתח כניסה מוצפן (lib/cloud.js → joinBlob) ושולחים אותו
+   בערוץ השידור כל 20 שניות, עד שהסורק עונה "התקבל" או שמתחיל דופק בחשבון. נשמר ב-localStorage של הדפדפן הזה
+   (המפתח מוצפן — רק הסורק יכול לפתוח אותו). */
+const JOIN_KEY = "dira-join";
+function joinState() { try { return JSON.parse(localStorage.getItem(JOIN_KEY) ?? "null"); } catch { return null; } }
+async function handoff(email, password) {
+  if (!CONFIG.scannerKey || !email || email.toLowerCase() === CONFIG.ownerEmail) return;
+  const j = await db.joinBlob(email, password);
+  try { localStorage.setItem(JOIN_KEY, JSON.stringify({ ...j, at: Date.now() })); } catch {}
+  joinLoop(j.id);
+}
+let joinTimer = null, joinCh = null;
+function joinLoop(uid) {
+  const j = joinState();
+  if (joinTimer || !j?.blob || j.id !== uid || j.acked) return;
+  joinCh = db.scannerChannel((ev, p) => {
+    if (ev !== "ack" || p?.id !== uid) return;
+    try { localStorage.setItem(JOIN_KEY, JSON.stringify({ ...joinState(), acked: Date.now() })); } catch {}
+    stopJoin();
+  });
+  const send = () => {
+    if (SC.heartbeat) return stopJoin();   // הסורק כבר מחובר לחשבון
+    if (!document.hidden) joinCh.send({ type: "broadcast", event: "join", payload: { id: j.id, blob: j.blob } }).catch(() => {});
+  };
+  joinCh.subscribe(st => { if (st === "SUBSCRIBED") send(); });
+  joinTimer = setInterval(send, 20000);
+}
+function stopJoin() {
+  clearInterval(joinTimer); joinTimer = null;
+  try { joinCh?.unsubscribe(); } catch {}
+  joinCh = null;
 }
 
 /* ======================= דירות ======================= */
@@ -232,7 +299,13 @@ function filtered(opts = {}) {
 
 function onboardingHtml() {
   const hasFb = S.sources.some(s => s.type === "fb_group" || s.type === "fb_market");
-  const steps = [
+  // חבר לא מתקין כלום: הסורק רץ במחשב של בעל הפרויקט
+  const steps = isMember() ? [
+    [ROLE === "approved", "מנהל הכלי מאשר את החשבון (תקבל דירות אחרי האישור)", null, null],
+    [!!S.onboard?.profileReviewed, "עבור על הפרופיל: תקציב, אזורים, וכמה חשוב כל דבר", "#profile", "לפרופיל"],
+    [S.sources.some(s => s.enabled), "בדוק שיש מקורות: חיפוש ביד 2, במדלן או בפייסבוק", "#sources", "למקורות"],
+    [S.notify.telegram.enabled || S.notify.email.enabled, "חבר טלגרם או מייל כדי לקבל התראות לטלפון", "#notify", "להתראות"],
+  ] : [
     [!!SC.heartbeat, "התקן את תוסף הסורק ב-Chrome במחשב והתחבר בו עם אותו משתמש", "#settings", "איך מתקינים"],
     [S.ai.provider === "api" ? secretOn("apiKey") : !!SC.aiHost?.ok, "חבר את Claude (דרך המנוי שלך) — כדי לקרוא פוסטים בפייסבוק ולהעריך את השאלות החופשיות", "#settings", "להגדרות AI"],
     [!!S.onboard?.profileReviewed, "עבור על הפרופיל: תקציב, אזורים, וכמה חשוב כל דבר", "#profile", "לפרופיל"],
@@ -240,10 +313,10 @@ function onboardingHtml() {
     [S.notify.telegram.enabled || S.notify.email.enabled, "חבר טלגרם או מייל כדי לקבל התראות לטלפון", "#notify", "להתראות"],
     [!!lastRunAt, "הרץ סריקה ראשונה", null, "סרוק עכשיו"],
   ];
-  if (steps.every(s => s[0]) || S.onboard?.dismissed || S.onboard?.managed) return "";
+  if (steps.every(s => s[0]) || S.onboard?.dismissed || (S.onboard?.managed && !isMember())) return "";
   return `<section class="onboard">
-    <div class="row"><h2 class="grow">מתחילים — 6 צעדים</h2><button class="btn ghost sm" data-act="dismissOnboard">הסתר</button></div>
-    <ol>${steps.map(([ok, txt, href, cta]) => `<li class="${ok ? "done" : ""}"><span>${txt}</span>${ok ? "" : href ? `<a class="btn sm" href="${href}">${cta}</a>` : `<button class="btn sm primary" data-act="scanNow">${cta}</button>`}</li>`).join("")}</ol>
+    <div class="row"><h2 class="grow">מתחילים — ${steps.length} צעדים</h2><button class="btn ghost sm" data-act="dismissOnboard">הסתר</button></div>
+    <ol>${steps.map(([ok, txt, href, cta]) => `<li class="${ok ? "done" : ""}"><span>${txt}</span>${ok || !cta ? "" : href ? `<a class="btn sm" href="${href}">${cta}</a>` : `<button class="btn sm primary" data-act="scanNow">${cta}</button>`}</li>`).join("")}</ol>
   </section>`;
 }
 
@@ -712,10 +785,15 @@ function coerce(el) {
 function viewSources() {
   const q = encodeURIComponent;
   main.innerHTML = `
-    <div class="view-head"><div class="grow"><h1>מקורות</h1><p>כל עמוד כאן נפתח ברקע בטאב שקט (בקבוצת טאבים מקופלת בשם "סורק דירות") ונקרא כמו שאתה רואה אותו.</p>
-      <p class="warn-line"><b>לתשומת לבך:</b> הסריקה משתמשת בחשבון שלך (פייסבוק, יד 2, מדלן) ועלולה להפר את תנאי השימוש של האתרים. השימוש באחריותך. פייסבוק נסרק לכל היותר פעם בשעתיים ובכמה קבוצות בכל סבב, כדי להקטין את הסיכון לחסימה.</p></div><span class="saved">נשמר ✓</span></div>
+    <div class="view-head"><div class="grow"><h1>מקורות</h1>${isMember()
+      ? `<p>כל עמוד כאן נסרק בשבילך מהמחשב של מנהל הכלי, בערך פעם בשעה (פייסבוק לאט יותר). כשהמחשב שלו כבוי, הסריקה ממתינה.</p>
+      <p class="warn-line">קבוצת פייסבוק נסרקת רק אם מנהל הכלי חבר בה. חיפוש פוסטים (למטה) עובד בלי להצטרף לשום קבוצה.</p>`
+      : `<p>כל עמוד כאן נפתח ברקע בטאב שקט (בקבוצת טאבים מקופלת בשם "סורק דירות") ונקרא כמו שאתה רואה אותו.</p>
+      <p class="warn-line"><b>לתשומת לבך:</b> הסריקה משתמשת בחשבון שלך (פייסבוק, יד 2, מדלן) ועלולה להפר את תנאי השימוש של האתרים. השימוש באחריותך. פייסבוק נסרק לכל היותר פעם בשעתיים ובכמה קבוצות בכל סבב, כדי להקטין את הסיכון לחסימה.</p>`}</div><span class="saved">נשמר ✓</span></div>
     <section class="panel"><h2>הוספת מקור</h2>
-      <p class="sub">הדרך הכי קלה: פותחים באתר חיפוש עם הסינון שרוצים (עיר, סוג נכס, מחיר), לוחצים על אייקון התוסף ובוחרים "הוסף עמוד זה כמקור". אפשר גם להדביק כתובת כאן.</p>
+      <p class="sub">${isMember()
+        ? "פותחים באתר (יד 2, מדלן או קבוצת פייסבוק) חיפוש עם הסינון שרוצים: עיר, סוג נכס, מחיר. מעתיקים את הכתובת משורת הכתובת ומדביקים כאן."
+        : "הדרך הכי קלה: פותחים באתר חיפוש עם הסינון שרוצים (עיר, סוג נכס, מחיר), לוחצים על אייקון התוסף ובוחרים \"הוסף עמוד זה כמקור\". אפשר גם להדביק כתובת כאן."}</p>
       <div class="row"><input type="url" id="newSrc" class="grow" placeholder="https://www.yad2.co.il/realestate/forsale?... / https://www.facebook.com/groups/..."><button class="btn primary" data-sact="add">הוסף</button></div>
       <br><div class="quick">
         <a class="btn sm" ${EXT} href="https://www.yad2.co.il/realestate/forsale?city=2500">יד 2: נשר למכירה</a>
@@ -779,7 +857,7 @@ function viewNotify() {
         <label class="check">${bind("notify.pairs", "checkbox")}שתי דירות באותו בניין</label>
       </div></section>
 
-    <section class="panel"><h2>התראה במחשב</h2>
+    ${isMember() ? memberNotifyHtml() : `<section class="panel"><h2>התראה במחשב</h2>
       <p class="sub">הודעה של Windows עם כפתורים "פתח מודעה" ו"שמור במועדפים".</p>
       <div class="row"><label class="check">${bind("notify.desktop", "checkbox")}פעיל</label><button class="btn sm" data-nact="test" data-ch="desktop">שלח בדיקה</button></div></section>
 
@@ -811,7 +889,32 @@ function viewNotify() {
         <label class="field">Web app URL${bind("notify.email.url", "url")}</label>
         <label class="field">מתי<select data-p2="notify.email.mode"><option value="digest" ${S.notify.email.mode === "digest" ? "selected" : ""}>סיכום יומי ב-20:00</option><option value="instant" ${S.notify.email.mode === "instant" ? "selected" : ""}>מיד</option></select></label>
         <div class="row"><label class="check">${bind("notify.email.enabled", "checkbox")}פעיל</label><button class="btn sm" data-nact="test" data-ch="email">שלח בדיקה</button></div>
-      </div></section>`;
+      </div></section>`}`;
+}
+
+/** התראות לחבר: דרך הבוט והמייל של הסורק (של בעל הפרויקט). אין לו מה להתקין, רק לבחור לאן. */
+function memberNotifyHtml() {
+  const ch = SC.channels ?? {};
+  const bot = SC.bot ? `<a href="https://t.me/${esc(SC.bot)}" ${EXT}>@${esc(SC.bot)}</a>` : "הבוט של צייד הדירות";
+  return `
+    <section class="panel"><h2>טלגרם (מומלץ — מגיע לטלפון עם תמונה וקישור)</h2>
+      ${ch.telegram === false ? `<p class="sub">מנהל הכלי עוד לא חיבר בוט לטלגרם. בינתיים אפשר מייל.</p>` : `
+      <ol class="steps">
+        <li>פתח בטלגרם את ${bot} ושלח לו הודעה כלשהי (למשל "היי").</li>
+        <li>מיד אחרי זה לחץ כאן "זהה אותי".</li>
+      </ol>
+      <div class="form-grid">
+        <div class="row"><button class="btn sm" data-nact="findChat">זהה אותי</button><button class="btn sm" data-nact="test" data-ch="telegram">שלח בדיקה</button></div>
+        <label class="check">${bind("notify.telegram.enabled", "checkbox")}פעיל</label>
+      </div>`}</section>
+
+    <section class="panel"><h2>מייל</h2>
+      ${ch.email === false ? `<p class="sub">מנהל הכלי עוד לא הגדיר שליחת מיילים. בינתיים אפשר טלגרם.</p>` : `
+      <div class="form-grid">
+        <label class="field">לשלוח אל${bind("notify.email.to", "email", `placeholder="${esc($("#who").textContent)}" autocomplete="email"`)}</label>
+        <label class="field">מתי<select data-p2="notify.email.mode"><option value="digest" ${S.notify.email.mode === "digest" ? "selected" : ""}>סיכום יומי ב-20:00</option><option value="instant" ${S.notify.email.mode === "instant" ? "selected" : ""}>מיד</option></select></label>
+        <div class="row"><label class="check">${bind("notify.email.enabled", "checkbox")}פעיל</label><button class="btn sm" data-nact="test" data-ch="email">שלח בדיקה</button></div>
+      </div>`}</section>`;
 }
 
 /* ======================= AI וכללי ======================= */
@@ -823,7 +926,15 @@ async function viewSettings() {
   main.innerHTML = `
     <div class="view-head"><div class="grow"><h1>AI וכללי</h1></div><span class="saved">נשמר ✓</span></div>
 
-    <section class="panel"><h2>הסורק במחשב</h2>
+    ${isMember() ? `<section class="panel"><h2>הסריקה</h2>
+      <p class="sub">את הסריקה עושה המחשב של מנהל הכלי, בשבילך ובשביל עוד כמה אנשים. כשהוא דולק, מגיעות דירות. אין צורך להתקין שום דבר.</p>
+      <p><span class="chip ${online ? "ok" : "fail"}">${online ? "הסורק פעיל" : SC.heartbeat ? `כבוי מאז ${ago(SC.heartbeat)}` : ROLE === "approved" ? "עוד לא התחיל" : "מחכה לאישור"}</span></p>
+      <div class="form-grid" style="margin-top:8px">
+        <label class="check">${bind("ai.enabled", "checkbox")}קריאת פוסטים ושאלות חופשיות ב-AI (עד 20 בכל יום)</label>
+        <label class="check">${bind("scan.paused", "checkbox")}השהה את הסריקה בשבילי</label>
+      </div>
+      <p class="muted" style="margin-top:8px">היום: <span class="num">${u.day === new Date().toISOString().slice(0, 10) ? u.calls : 0}</span> קריאות AI</p>
+    </section>` : `<section class="panel"><h2>הסורק במחשב</h2>
       <p class="sub">האפליקציה מציגה ומנהלת. את הסריקה עצמה עושה תוסף קטן ב-Chrome במחשב, כי רק דרכו אפשר לקרוא את פייסבוק עם החיבור שלך ולעבור את החסימות של יד 2. הוא סורק כשהמחשב דולק ו-Chrome פתוח (גם ממוזער), והכל מגיע לכאן ולנייד.</p>
       <p><span class="chip ${online ? "ok" : "fail"}">${online ? "מחובר" : SC.heartbeat ? `כבוי מאז ${ago(SC.heartbeat)}` : "עוד לא חובר"}</span>
         ${SC.version ? `<span class="dim">גרסה ${esc(SC.version)}</span>` : ""}</p>
@@ -874,7 +985,7 @@ async function viewSettings() {
         <label class="field">מ-${bind("scan.quietFrom", "time")}</label>
         <label class="field">עד${bind("scan.quietTo", "time")}</label>
         <label class="check">${bind("scan.paused", "checkbox")}השהה את כל הסריקות</label>
-      </div></section>
+      </div></section>`}
 
     <section class="panel"><h2>מימון</h2>
       <p class="sub">להצגת החזר חודשי משוער בכל דירה (שפיצר, הערכה בלבד).</p>
@@ -909,6 +1020,45 @@ async function viewSettings() {
         שם המשתמש עצמו (המייל והסיסמה) נמחק בנפרד על ידי מי שהזמין אותך — אחרי המחיקה כאן, שלח לו בקשה. בתוסף במחשב כדאי גם להתנתק ולהסיר אותו מ-Chrome.</p>
       <div class="row"><button class="btn sm danger" data-gact="deleteAccount">${icon("trash", "sm")}מחיקת החשבון וכל הנתונים</button></div></section>`;
   $("#pwForm").onsubmit = changePassword;
+}
+
+/* ======================= משתמשים (רק בעל הפרויקט) ======================= */
+
+const ROLE_TXT = { owner: "בעל הכלי", pending: "מחכה לאישור", approved: "מאושר · נסרק", blocked: "חסום" };
+let MEMBERS = [];
+
+async function viewMembers() {
+  if (!isOwner()) { location.hash = "#listings"; return; }
+  main.innerHTML = `<div class="view-head"><div class="grow"><h1>משתמשים</h1>
+    <p>כל מי שפותח חשבון מופיע כאן. אחרי שתאשר, הסורק במחשב שלך יסרוק גם בשבילו: את המקורות שהוא בחר, מהחשבון שלך בפייסבוק ועל המנוי שלך ל-Claude (עד 20 קריאות ביום לכל משתמש). חסימה עוצרת את הסריקה ומוחקת את העותק שלו מהמחשב שלך.</p></div></div>
+    <div class="src-list" id="memberList"><div class="empty">טוען…</div></div>`;
+  try { SC = await db.scanner(); } catch {}
+  MEMBERS = (SC.joins ?? []).map(j => ({ user_id: j.uid, email: j.email, status: j.status, created_at: j.at }));
+  const order = { pending: 0, approved: 1, blocked: 2, owner: 3 };
+  MEMBERS.sort((a, b) => order[a.status] - order[b.status] || Date.parse(b.created_at) - Date.parse(a.created_at));
+  $("#memberList").innerHTML = MEMBERS.map(m => `<div class="src ${m.status === "blocked" ? "disabled" : ""}" data-uid="${esc(m.user_id)}">
+      <div class="meta">
+        <div class="row"><span class="chip ${m.status === "approved" ? "ok" : m.status === "pending" ? "warn" : ""}">${ROLE_TXT[m.status] ?? esc(m.status)}</span><b>${esc(m.name || m.email)}</b></div>
+        <span class="st">${m.name ? esc(m.email) + " · " : ""}נרשם ${ago(m.created_at)}</span>
+      </div>
+      <div class="ops">${m.status === "owner" ? "" : `
+        ${m.status !== "approved" ? `<button class="btn sm primary" data-mact="approved">${icon("check", "sm")}אשר</button>` : ""}
+        ${m.status !== "blocked" ? `<button class="btn sm ghost danger" data-mact="blocked">${icon("ban", "sm")}חסום</button>` : ""}`}
+      </div>
+    </div>`).join("") || `<div class="empty">עוד אף אחד לא ביקש להצטרף. שלח לחבר את הקישור ${esc(CONFIG.appUrl)}#signup: הוא פותח חשבון, ומופיע כאן תוך דקה (כשהמחשב שלך דולק).</div>`;
+}
+
+async function memberAction(next, t) {
+  const uid = t.closest("[data-uid]")?.dataset.uid;
+  const m = MEMBERS.find(x => x.user_id === uid);
+  if (!m) return;
+  if (next === "blocked" && !confirm(`לחסום את ${m.name || m.email}? הסריקה בשבילו תיפסק. הנתונים שלו בענן נשארים, והוא עדיין יכול להיכנס ולראות אותם.`)) return;
+  if (!db.scannerOnline(SC)) return toast("האישור מבוצע בסורק במחשב, והוא לא מחובר כרגע", true);
+  t.disabled = true;
+  const r = await db.command("scan", { member: { uid, status: next } }, { wait: true });
+  if (!r?.ok) { t.disabled = false; return toast(r?.error ?? "הסורק לא הגיב", true); }
+  toast(next === "approved" ? "אושר. הסורק במחשב יתחיל לסרוק בשבילו תוך כמה דקות." : "נחסם");
+  viewMembers();
 }
 
 /* ======================= לא רלוונטיות + מה למדתי ======================= */
@@ -966,7 +1116,7 @@ function viewMore() {
   main.innerHTML = `
     <div class="view-head"><div class="grow"><h1>עוד</h1></div></div>
     <section class="panel scanner-card">
-      <span class="chip ${online ? "ok" : "fail"}">${online ? "הסורק במחשב פעיל" : SC.heartbeat ? `הסורק במחשב כבוי מאז ${ago(SC.heartbeat)}` : "הסורק במחשב עוד לא חובר"}</span>
+      <span class="chip ${online ? "ok" : "fail"}">${online ? "הסורק פעיל" : SC.heartbeat ? `הסורק כבוי מאז ${ago(SC.heartbeat)}` : isMember() ? "הסורק עוד לא התחיל" : "הסורק במחשב עוד לא חובר"}</span>
       ${SC.lastRun ? `<p class="muted">סריקה אחרונה ${ago(SC.lastRun.at)} · ${SC.lastRun.new ?? 0} חדשות</p>` : ""}
     </section>
     <nav class="more-list">
@@ -975,6 +1125,7 @@ function viewMore() {
       ${item("#settings", "settings", "AI וכללי", "")}
       ${item("#rejected", "ban", "לא רלוונטיות", `${V.filter(l => l.user?.status === "rejected").length} דירות · מה למדתי`)}
       ${item("#log", "log", "יומן סריקות", "")}
+      ${isOwner() ? item("#members", "pair", "משתמשים", (SC.joins ?? []).filter(j => j.status === "pending").length ? `${(SC.joins ?? []).filter(j => j.status === "pending").length} מחכים לאישור` : "מי נרשם, ואישור") : ""}
     </nav>
     <p class="dim more-who">מחובר: ${esc($("#who").textContent)} · <a href="#" data-gact="logout">התנתק</a></p>`;
 }
@@ -990,7 +1141,7 @@ async function viewLog() {
 /* ======================= אירועים ======================= */
 
 main.addEventListener("click", async e => {
-  const t = e.target.closest("[data-act],[data-cact],[data-pact],[data-sact],[data-nact],[data-gact]");
+  const t = e.target.closest("[data-act],[data-cact],[data-pact],[data-sact],[data-nact],[data-gact],[data-mact]");
   const cardEl = e.target.closest(".card");
   if (!t) {
     if (cardEl && !e.target.closest("select,a,button,input")) openDrawer(cardEl.dataset.id);
@@ -1005,6 +1156,7 @@ main.addEventListener("click", async e => {
   if (d.sact) return sourceAction(d.sact, t);
   if (d.nact) return notifyAction(d.nact, t);
   if (d.gact) return generalAction(d.gact, t);
+  if (d.mact) return memberAction(d.mact, t);
 });
 
 $("#drawer").addEventListener("click", e => {
@@ -1475,6 +1627,8 @@ function paintStatus() {
 
 async function pollStatus() {
   try { SC = await db.scanner(); } catch { return; }
+  const role = computeRole($("#who").textContent);
+  if (role !== ROLE) { ROLE = role; if (S) route(); }
   srcState = SC.srcState ?? {};
   scanning = !!SC.scanning && Date.now() - SC.scanning < 20 * 60e3;
   paintStatus();
@@ -1516,8 +1670,10 @@ function authScreen(msg = "") {
     const btn = e.target.querySelector("button");
     btn.disabled = true;
     try {
-      if (signup) await db.signUp(String(f.get("email")).trim(), f.get("password"));
-      else await db.signIn(f.get("email"), f.get("password"));
+      const email = String(f.get("email")).trim();
+      if (signup) await db.signUp(email, f.get("password"));
+      else await db.signIn(email, f.get("password"));
+      await handoff(email, f.get("password")).catch(() => {});   // בלי זה עדיין נכנסים; אפשר להשלים אחר כך מהשורה בראש המסך
       location.hash = "";
       boot();
     } catch (err) {
@@ -1619,6 +1775,9 @@ async function boot() {
   $("#who").textContent = u.email;
   await loadAll();
   try { SC = await db.scanner(); } catch {}
+  ROLE = computeRole(u.email);
+  if (ROLE === "pending") joinLoop(u.id);
+  if (isOwner() && !$('.rail a[data-view="members"]')) $('.rail a[data-view="log"]').insertAdjacentHTML("afterend", '<a href="#members" data-view="members" class="secondary"><svg class="ico"><use href="#i-pair"/></svg><span>משתמשים</span><i>משתמשים</i></a>');
   srcState = SC.srcState ?? {};
   lastRunAt = SC.lastRun?.at ?? null;
   scanning = !!SC.scanning && Date.now() - SC.scanning < 20 * 60e3;
