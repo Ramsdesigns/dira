@@ -25,9 +25,11 @@ let scanning = false;
 // approved / pending / blocked = נרשם עם Google, והסורק של בעל הפרויקט סורק בשבילו (אחרי אישור).
 // owner לפי CONFIG.ownerEmail; חבר = approved ברגע שהסורק כותב אצלו דופק, ועד אז pending
 let ROLE = null;
+// בעל הפרויקט נכנס בשתי כתובות (התוסף מחובר עם rambenamram@, האפליקציה אולי עם rambenamram11@)
+const OWNERS = [].concat(CONFIG.ownerEmail ?? []).map(x => String(x).toLowerCase());
 function computeRole(email) {
-  if (!CONFIG.ownerEmail || !email) return null;
-  if (email.toLowerCase() === CONFIG.ownerEmail) return "owner";
+  if (!OWNERS.length || !email) return null;
+  if (OWNERS.includes(email.toLowerCase())) return "owner";
   return SC.heartbeat ? "approved" : "pending";
 }
 const isMember = () => !!ROLE && ROLE !== "owner";
@@ -237,7 +239,7 @@ function roleNote() {
 const JOIN_KEY = "dira-join";
 function joinState() { try { return JSON.parse(localStorage.getItem(JOIN_KEY) ?? "null"); } catch { return null; } }
 async function handoff(email, password) {
-  if (!CONFIG.scannerKey || !email || email.toLowerCase() === CONFIG.ownerEmail) return;
+  if (!CONFIG.scannerKey || !email || OWNERS.includes(email.toLowerCase())) return;
   const j = await db.joinBlob(email, password);
   try { localStorage.setItem(JOIN_KEY, JSON.stringify({ ...j, at: Date.now() })); } catch {}
   joinLoop(j.id);
